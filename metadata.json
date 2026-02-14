@@ -1,0 +1,8 @@
+{
+  "name": "Whisper Clipboard",
+  "description": "Record audio with a shortcut, transcribe with whisper.cpp, copy to clipboard",
+  "uuid": "whisper-clipboard@local",
+  "shell-version": ["49"],
+  "version": 1,
+  "url": ""
+}

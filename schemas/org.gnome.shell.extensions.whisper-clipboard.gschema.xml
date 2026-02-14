@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist>
+  <schema id="org.gnome.shell.extensions.whisper-clipboard"
+          path="/org/gnome/shell/extensions/whisper-clipboard/">
+    <key name="whisper-clipboard-toggle" type="as">
+      <default>['&lt;Shift&gt;&lt;Alt&gt;space']</default>
+      <summary>Toggle voice recording</summary>
+      <description>Start/stop audio recording for whisper transcription</description>
+    </key>
+    <key name="whisper-language" type="s">
+      <default>'it'</default>
+      <summary>Whisper language</summary>
+      <description>Language code passed to whisper-cli (-l flag)</description>
+    </key>
+    <key name="whisper-model" type="s">
+      <default>'/opt/whisper.cpp/models/ggml-small.bin'</default>
+      <summary>Whisper model path</summary>
+      <description>Path to the whisper.cpp GGML model file</description>
+    </key>
+  </schema>
+</schemalist>
