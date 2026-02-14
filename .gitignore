@@ -1,0 +1,12 @@
+# Compiled GSettings schemas
+schemas/gschemas.compiled
+
+# GNOME Shell extension packaging
+*.zip
+*.shell-extension.zip
+
+# Temporary audio files
+*.wav
+
+# Claude Code local settings
+.claude/settings.local.json
