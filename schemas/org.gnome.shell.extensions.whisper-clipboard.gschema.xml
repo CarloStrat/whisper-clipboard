@@ -17,5 +17,20 @@
       <summary>Whisper model path</summary>
       <description>Path to the whisper.cpp GGML model file</description>
     </key>
+    <key name="auto-paste" type="b">
+      <default>false</default>
+      <summary>Auto-paste after transcription</summary>
+      <description>Automatically paste transcribed text into the focused application</description>
+    </key>
+    <key name="paste-use-ctrl-shift-v" type="b">
+      <default>false</default>
+      <summary>Use Ctrl+Shift+V for pasting</summary>
+      <description>Use Ctrl+Shift+V instead of Ctrl+V (for terminal apps)</description>
+    </key>
+    <key name="server-port" type="i">
+      <default>8178</default>
+      <summary>Whisper server port</summary>
+      <description>Port for the whisper-server HTTP backend</description>
+    </key>
   </schema>
 </schemalist>
