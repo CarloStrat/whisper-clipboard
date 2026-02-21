@@ -8,7 +8,6 @@ import Adw from 'gi://Adw';
 import Gtk from 'gi://Gtk';
 import Gdk from 'gi://Gdk';
 import Gio from 'gi://Gio';
-import GLib from 'gi://GLib';
 import GObject from 'gi://GObject';
 import {ExtensionPreferences} from 'resource:///org/gnome/shell/extensions/prefs.js';
 
@@ -38,8 +37,9 @@ const LANGUAGES = [
 /* ── Shortcut capture row ── */
 
 /**
- * An Adw.ActionRow that shows the current shortcut and opens a capture dialog
- * when activated.
+ * Adw.ActionRow that shows the current shortcut via Gtk.ShortcutLabel inside
+ * a flat button. Clicking the button (or the row) opens a capture window where
+ * the next key combination is recorded as the new shortcut.
  */
 const ShortcutRow = GObject.registerClass(
 class ShortcutRow extends Adw.ActionRow {
@@ -49,89 +49,99 @@ class ShortcutRow extends Adw.ActionRow {
         this._settings = settings;
         this._key = key;
 
-        this._label = new Gtk.ShortcutLabel({
-            accelerator: this._getAccel(),
+        // Gtk.ShortcutLabel renders the accel nicely; wrap it in a flat button
+        // so the row has a proper activatable widget that responds to clicks.
+        this._accelLabel = new Gtk.ShortcutLabel({
             disabled_text: 'Disabled',
             valign: Gtk.Align.CENTER,
         });
-        this.add_suffix(this._label);
-        this.set_activatable_widget(this._label);
 
-        this._settings.connect(`changed::${key}`, () => {
-            this._label.set_accelerator(this._getAccel());
+        this._button = new Gtk.Button({
+            child: this._accelLabel,
+            valign: Gtk.Align.CENTER,
+            css_classes: ['flat'],
         });
 
-        this.connect('activated', () => this._startCapture());
+        this.add_suffix(this._button);
+        this.set_activatable_widget(this._button);
+
+        this._refresh();
+        this._settings.connect(`changed::${this._key}`, () => this._refresh());
+        this._button.connect('clicked', () => this._openCapture());
     }
 
-    _getAccel() {
+    _refresh() {
         const accels = this._settings.get_strv(this._key);
-        return (accels.length > 0 && accels[0]) ? accels[0] : '';
+        this._accelLabel.set_accelerator(
+            accels.length > 0 && accels[0] ? accels[0] : '',
+        );
     }
 
-    _startCapture() {
-        const dialog = new Gtk.Window({
+    _openCapture() {
+        const win = new Gtk.Window({
             title: `Set shortcut – ${this.get_title()}`,
-            modal: true,
             transient_for: this.get_root(),
-            default_width: 360,
-            default_height: 180,
+            modal: true,
+            default_width: 400,
+            default_height: 200,
             resizable: false,
         });
 
         const box = new Gtk.Box({
             orientation: Gtk.Orientation.VERTICAL,
-            spacing: 16,
-            margin_top: 24,
+            spacing: 20,
+            margin_top: 30,
             margin_bottom: 24,
             margin_start: 24,
             margin_end: 24,
         });
-        dialog.set_child(box);
+        win.set_child(box);
 
         box.append(new Gtk.Label({
-            label: '<b>Press a key combination…</b>',
+            label: '<b>Press a key combination…</b>\n<small>Escape to cancel</small>',
             use_markup: true,
             halign: Gtk.Align.CENTER,
+            justify: Gtk.Justification.CENTER,
         }));
 
-        const currentLabel = new Gtk.ShortcutLabel({
-            accelerator: this._getAccel(),
+        // Live preview of the current shortcut
+        const preview = new Gtk.ShortcutLabel({
+            accelerator: this._settings.get_strv(this._key)[0] ?? '',
             disabled_text: '(none)',
             halign: Gtk.Align.CENTER,
         });
-        box.append(currentLabel);
+        box.append(preview);
 
-        const btnBox = new Gtk.Box({
-            orientation: Gtk.Orientation.HORIZONTAL,
-            spacing: 8,
+        const disableBtn = new Gtk.Button({
+            label: 'Disable shortcut',
             halign: Gtk.Align.CENTER,
+            css_classes: ['destructive-action'],
         });
-        box.append(btnBox);
-
-        const disableBtn = new Gtk.Button({label: 'Disable'});
         disableBtn.connect('clicked', () => {
             this._settings.set_strv(this._key, []);
-            dialog.destroy();
+            win.destroy();
         });
-        btnBox.append(disableBtn);
+        box.append(disableBtn);
 
-        const cancelBtn = new Gtk.Button({label: 'Cancel'});
-        cancelBtn.connect('clicked', () => dialog.destroy());
-        btnBox.append(cancelBtn);
-
+        // Key capture
         const controller = new Gtk.EventControllerKey();
-        dialog.add_controller(controller);
+        win.add_controller(controller);
 
         controller.connect('key-pressed', (_ctrl, keyval, _keycode, state) => {
-            // Skip bare modifier presses
+            // Escape = cancel
+            if (keyval === Gdk.KEY_Escape) {
+                win.destroy();
+                return true;
+            }
+
+            // Ignore bare modifier presses
             const modOnly = [
                 Gdk.KEY_Control_L, Gdk.KEY_Control_R,
                 Gdk.KEY_Shift_L,   Gdk.KEY_Shift_R,
                 Gdk.KEY_Alt_L,     Gdk.KEY_Alt_R,
                 Gdk.KEY_Super_L,   Gdk.KEY_Super_R,
                 Gdk.KEY_ISO_Level3_Shift,
-                Gdk.KEY_Caps_Lock,
+                Gdk.KEY_Caps_Lock, Gdk.KEY_Num_Lock,
             ];
             if (modOnly.includes(keyval))
                 return false;
@@ -140,12 +150,12 @@ class ShortcutRow extends Adw.ActionRow {
             const accel = Gtk.accelerator_name(keyval, mask);
             if (accel) {
                 this._settings.set_strv(this._key, [accel]);
-                dialog.destroy();
+                win.destroy();
             }
             return true;
         });
 
-        dialog.present();
+        win.present();
     }
 });
 
@@ -156,21 +166,24 @@ export default class WhisperClipboardPreferences extends ExtensionPreferences {
     fillPreferencesWindow(window) {
         const settings = this.getSettings();
 
-        window.set_default_size(640, 700);
+        window.set_default_size(640, 720);
 
-        /* ── General page ── */
+        /* ════════════════════════════════ General page ══ */
         const generalPage = new Adw.PreferencesPage({
             title: 'General',
             icon_name: 'preferences-system-symbolic',
         });
         window.add(generalPage);
 
-        /* Shortcuts group */
-        const shortcutsGroup = new Adw.PreferencesGroup({title: 'Shortcuts'});
+        /* ── Shortcuts ── */
+        const shortcutsGroup = new Adw.PreferencesGroup({
+            title: 'Shortcuts',
+            description: 'Click a row to set a new key combination',
+        });
         generalPage.add(shortcutsGroup);
 
         shortcutsGroup.add(new ShortcutRow(
-            {title: 'Toggle recording', subtitle: 'Start / stop recording'},
+            {title: 'Toggle recording', subtitle: 'Start or stop recording'},
             settings, 'whisper-clipboard-toggle',
         ));
 
@@ -186,7 +199,7 @@ export default class WhisperClipboardPreferences extends ExtensionPreferences {
         settings.bind('push-to-talk', pttRow, 'active', Gio.SettingsBindFlags.DEFAULT);
         shortcutsGroup.add(pttRow);
 
-        /* Transcription group */
+        /* ── Transcription ── */
         const transcriptionGroup = new Adw.PreferencesGroup({title: 'Transcription'});
         generalPage.add(transcriptionGroup);
 
@@ -200,27 +213,22 @@ export default class WhisperClipboardPreferences extends ExtensionPreferences {
 
         const langRow = new Adw.ComboRow({
             title: 'Language',
-            subtitle: 'Language code sent to whisper-server per request',
+            subtitle: 'Language sent to whisper-server per transcription request',
             model: langModel,
         });
 
-        const currentLang = settings.get_string('whisper-language');
-        const langIdx = langCodes.indexOf(currentLang);
-        langRow.set_selected(langIdx >= 0 ? langIdx : 0);
+        const syncLangCombo = () => {
+            const idx = langCodes.indexOf(settings.get_string('whisper-language'));
+            if (idx >= 0) langRow.set_selected(idx);
+        };
+        syncLangCombo();
 
         langRow.connect('notify::selected', () => {
             const idx = langRow.get_selected();
             if (idx >= 0 && idx < langCodes.length)
                 settings.set_string('whisper-language', langCodes[idx]);
         });
-
-        settings.connect('changed::whisper-language', () => {
-            const code = settings.get_string('whisper-language');
-            const idx = langCodes.indexOf(code);
-            if (idx >= 0)
-                langRow.set_selected(idx);
-        });
-
+        settings.connect('changed::whisper-language', syncLangCombo);
         transcriptionGroup.add(langRow);
 
         const autoDetectRow = new Adw.SwitchRow({
@@ -237,7 +245,7 @@ export default class WhisperClipboardPreferences extends ExtensionPreferences {
         settings.bind('translate-to-english', translateRow, 'active', Gio.SettingsBindFlags.DEFAULT);
         transcriptionGroup.add(translateRow);
 
-        /* Clipboard group */
+        /* ── Clipboard ── */
         const clipboardGroup = new Adw.PreferencesGroup({title: 'Clipboard'});
         generalPage.add(clipboardGroup);
 
@@ -255,13 +263,13 @@ export default class WhisperClipboardPreferences extends ExtensionPreferences {
         settings.bind('paste-use-ctrl-shift-v', ctrlShiftVRow, 'active', Gio.SettingsBindFlags.DEFAULT);
         clipboardGroup.add(ctrlShiftVRow);
 
-        /* History group */
+        /* ── History ── */
         const historyGroup = new Adw.PreferencesGroup({title: 'History'});
         generalPage.add(historyGroup);
 
         const historyRow = new Adw.SpinRow({
             title: 'History size',
-            subtitle: 'Number of past transcriptions kept in the History menu',
+            subtitle: 'Number of past transcriptions kept in the History menu (1–50)',
             adjustment: new Gtk.Adjustment({
                 lower: 1,
                 upper: 50,
@@ -269,24 +277,35 @@ export default class WhisperClipboardPreferences extends ExtensionPreferences {
                 value: settings.get_int('history-size'),
             }),
         });
-        settings.bind('history-size', historyRow, 'value', Gio.SettingsBindFlags.DEFAULT);
+        // Use notify::value to safely bridge gdouble ↔ gint
+        historyRow.connect('notify::value', () => {
+            settings.set_int('history-size', Math.round(historyRow.get_value()));
+        });
+        settings.connect('changed::history-size', () => {
+            historyRow.set_value(settings.get_int('history-size'));
+        });
         historyGroup.add(historyRow);
 
-        /* ── Server page ── */
+        /* ════════════════════════════════ Server page ══ */
         const serverPage = new Adw.PreferencesPage({
             title: 'Server',
             icon_name: 'network-server-symbolic',
         });
         window.add(serverPage);
 
-        const serverGroup = new Adw.PreferencesGroup({title: 'whisper-server'});
+        const serverGroup = new Adw.PreferencesGroup({
+            title: 'whisper-server',
+            description: 'Changes take effect after restarting the server from the panel menu',
+        });
         serverPage.add(serverGroup);
 
+        // Model path — apply on Enter / focus-out
         const modelRow = new Adw.EntryRow({
             title: 'Model path',
             text: settings.get_string('whisper-model'),
+            show_apply_button: true,
         });
-        modelRow.connect('changed', () => {
+        modelRow.connect('apply', () => {
             settings.set_string('whisper-model', modelRow.get_text());
         });
         settings.connect('changed::whisper-model', () => {
@@ -295,28 +314,32 @@ export default class WhisperClipboardPreferences extends ExtensionPreferences {
         });
         serverGroup.add(modelRow);
 
+        // Extra models directory
         const modelsDirRow = new Adw.EntryRow({
             title: 'Extra models directory',
             text: settings.get_string('whisper-models-dir'),
+            show_apply_button: true,
         });
-        modelsDirRow.connect('changed', () => {
+        modelsDirRow.connect('apply', () => {
             settings.set_string('whisper-models-dir', modelsDirRow.get_text());
         });
         serverGroup.add(modelsDirRow);
 
+        // whisper-server binary override
         const binRow = new Adw.EntryRow({
             title: 'whisper-server binary',
             text: settings.get_string('whisper-server-bin'),
+            show_apply_button: true,
         });
-        binRow.set_show_apply_button(true);
         binRow.connect('apply', () => {
             settings.set_string('whisper-server-bin', binRow.get_text());
         });
         serverGroup.add(binRow);
 
+        // Server port
         const portRow = new Adw.SpinRow({
             title: 'Server port',
-            subtitle: 'HTTP port for the whisper-server backend',
+            subtitle: 'HTTP port for the local whisper-server (default 8178)',
             adjustment: new Gtk.Adjustment({
                 lower: 1024,
                 upper: 65535,
@@ -324,7 +347,12 @@ export default class WhisperClipboardPreferences extends ExtensionPreferences {
                 value: settings.get_int('server-port'),
             }),
         });
-        settings.bind('server-port', portRow, 'value', Gio.SettingsBindFlags.DEFAULT);
+        portRow.connect('notify::value', () => {
+            settings.set_int('server-port', Math.round(portRow.get_value()));
+        });
+        settings.connect('changed::server-port', () => {
+            portRow.set_value(settings.get_int('server-port'));
+        });
         serverGroup.add(portRow);
     }
 }

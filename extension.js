@@ -816,9 +816,7 @@ export default class WhisperClipboardExtension extends Extension {
 
             this._state = State.RECORDING;
             this._icon.icon_name = 'media-record-symbolic';
-            this._icon.remove_style_class_name('whisper-icon-transcribing');
-            this._icon.remove_style_class_name('whisper-icon-success');
-            this._icon.add_style_class_name('whisper-icon-recording');
+            this._icon.set_style('color: #ff4444;');
             this._updateStatusLabel();
 
             // Start the recording timer
@@ -890,9 +888,7 @@ export default class WhisperClipboardExtension extends Extension {
         // Update UI and show notification immediately — before waiting for ffmpeg
         this._state = State.TRANSCRIBING;
         this._icon.icon_name = 'emblem-synchronizing-symbolic';
-        this._icon.remove_style_class_name('whisper-icon-recording');
-        this._icon.remove_style_class_name('whisper-icon-success');
-        this._icon.add_style_class_name('whisper-icon-transcribing');
+        this._icon.set_style('color: #ffaa00;');
         this._updateStatusLabel();
         Main.notify('Whisper Clipboard', 'Transcribing…');
 
@@ -995,9 +991,7 @@ export default class WhisperClipboardExtension extends Extension {
                     this._pasteFromClipboard();
 
                 this._icon.icon_name = 'object-select-symbolic';
-                this._icon.remove_style_class_name('whisper-icon-recording');
-                this._icon.remove_style_class_name('whisper-icon-transcribing');
-                this._icon.add_style_class_name('whisper-icon-success');
+                this._icon.set_style('color: #44ff44;');
 
                 this._successTimeoutId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, 3, () => {
                     this._successTimeoutId = null;
@@ -1056,9 +1050,7 @@ export default class WhisperClipboardExtension extends Extension {
         this._stopTimer();
         if (this._icon) {
             this._icon.icon_name = 'audio-input-microphone-symbolic';
-            this._icon.remove_style_class_name('whisper-icon-recording');
-            this._icon.remove_style_class_name('whisper-icon-transcribing');
-            this._icon.remove_style_class_name('whisper-icon-success');
+            this._icon.set_style('');
         }
         this._updateStatusLabel();
     }
