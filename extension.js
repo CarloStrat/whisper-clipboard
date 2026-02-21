@@ -21,6 +21,7 @@ import Meta from 'gi://Meta';
 import Shell from 'gi://Shell';
 import Clutter from 'gi://Clutter';
 import Soup from 'gi://Soup?version=3.0';
+import Cairo from 'cairo';
 
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import * as PanelMenu from 'resource:///org/gnome/shell/ui/panelMenu.js';
@@ -85,6 +86,11 @@ const RELEVANT_MODS =
     Clutter.ModifierType.MOD1_MASK    |
     Clutter.ModifierType.SUPER_MASK;
 
+// Waveform overlay dimensions
+const WAVEFORM_BARS = 140;  // number of amplitude bars
+const WAVEFORM_W    = 450;  // overlay width in px
+const WAVEFORM_H    = 64;   // overlay height in px
+
 export default class WhisperClipboardExtension extends Extension {
 
     enable() {
@@ -97,6 +103,16 @@ export default class WhisperClipboardExtension extends Extension {
         this._timerSourceId = null;
         this._recordingStartTime = 0;
         this._history = [];
+
+        // Waveform overlay state
+        this._vizProc = null;
+        this._vizInputStream = null;
+        this._vizCancellable = null;
+        this._vizAmplitudes = [];
+        this._vizDrawId = null;
+        this._vizWarmupChunks = 0;
+        this._waveformOverlay = null;
+        this._waveformArea = null;
 
         // Push-to-talk state
         this._pttPressId = null;
@@ -187,6 +203,7 @@ export default class WhisperClipboardExtension extends Extension {
         }
 
         /* ── subprocesses ── */
+        this._stopWaveformOverlay();
         this._killRecording();
         this._stopServer();
 
@@ -823,6 +840,7 @@ export default class WhisperClipboardExtension extends Extension {
 
             // Start the recording timer
             this._startTimer();
+            this._startWaveformOverlay();
 
             Main.notify('Whisper Clipboard', 'Recording started…');
         } catch (e) {
@@ -835,6 +853,7 @@ export default class WhisperClipboardExtension extends Extension {
         if (this._state !== State.RECORDING)
             return;
 
+        this._stopWaveformOverlay();
         this._killRecording();
         this._resetIndicator();
 
@@ -884,6 +903,7 @@ export default class WhisperClipboardExtension extends Extension {
 
     _stopAndTranscribe() {
         this._stopTimer();
+        this._stopWaveformOverlay();
 
         // Update UI and show notification immediately — before waiting for ffmpeg
         this._state = State.TRANSCRIBING;
@@ -1031,6 +1051,207 @@ export default class WhisperClipboardExtension extends Extension {
 
             return GLib.SOURCE_REMOVE;
         });
+    }
+
+    /* ────────────────────────────────────────────────────────── */
+    /*  Waveform overlay                                           */
+    /* ────────────────────────────────────────────────────────── */
+
+    _startWaveformOverlay() {
+        // Spawn a lightweight ffmpeg for audio visualization only
+        try {
+            this._vizCancellable = new Gio.Cancellable();
+            this._vizProc = Gio.Subprocess.new(
+                ['ffmpeg', '-nostdin', '-f', 'alsa', '-i', 'default',
+                 '-ar', '16000', '-ac', '1', '-f', 's16le', 'pipe:1'],
+                Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_SILENCE,
+            );
+            this._vizInputStream = this._vizProc.get_stdout_pipe();
+        } catch (e) {
+            log(`[WhisperClipboard] Viz ffmpeg failed: ${e.message}`);
+            this._vizProc = null;
+            this._vizInputStream = null;
+            this._vizCancellable = null;
+            // Continue — show overlay without animation
+        }
+
+        this._vizAmplitudes = new Array(WAVEFORM_BARS).fill(0);
+        this._vizWarmupChunks = 3; // discard first ~300 ms of ffmpeg startup noise
+
+        // Container (waveform + buttons stacked vertically)
+        this._waveformOverlay = new St.BoxLayout({vertical: true, reactive: true});
+
+        // Drawing area
+        this._waveformArea = new St.DrawingArea({
+            width: WAVEFORM_W,
+            height: WAVEFORM_H,
+            reactive: false,
+        });
+        this._waveformArea.connect('repaint', area => {
+            const cr = area.get_context();
+            this._drawWaveform(cr, WAVEFORM_W, WAVEFORM_H);
+            cr.$dispose();
+        });
+        this._waveformOverlay.add_child(this._waveformArea);
+
+        // Button row
+        const btnRow = new St.BoxLayout({
+            vertical: false,
+            reactive: true,
+            x_expand: true,
+            style: 'padding: 4px 6px 6px 6px;',
+        });
+
+        const stopBtn = new St.Button({
+            label: 'Stop',
+            reactive: true,
+            can_focus: false,
+            x_expand: true,
+            style: 'background-color: rgba(200,60,60,0.9); color: white; ' +
+                   'border-radius: 6px; padding: 5px 0; margin-right: 4px; font-size: 12px;',
+        });
+        stopBtn.connect('clicked', () => this._cancelRecording());
+
+        const transcribeBtn = new St.Button({
+            label: 'Transcribe',
+            reactive: true,
+            can_focus: false,
+            x_expand: true,
+            style: 'background-color: rgba(50,110,220,0.9); color: white; ' +
+                   'border-radius: 6px; padding: 5px 0; font-size: 12px;',
+        });
+        transcribeBtn.connect('clicked', () => this._stopAndTranscribe());
+
+        btnRow.add_child(stopBtn);
+        btnRow.add_child(transcribeBtn);
+        this._waveformOverlay.add_child(btnRow);
+
+        Main.uiGroup.add_child(this._waveformOverlay);
+        this._positionWaveformOverlay();
+
+        if (this._vizInputStream)
+            this._readVizChunk();
+
+        // ~20 fps repaint timer
+        this._vizDrawId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 50, () => {
+            if (this._waveformArea)
+                this._waveformArea.queue_repaint();
+            return GLib.SOURCE_CONTINUE;
+        });
+    }
+
+    _positionWaveformOverlay() {
+        if (!this._waveformOverlay)
+            return;
+        const monitor = Main.layoutManager.primaryMonitor;
+        if (!monitor)
+            return;
+        const x = monitor.x + 8;
+        const y = monitor.y + Main.panel.height + 4;
+        this._waveformOverlay.set_position(x, y);
+    }
+
+    _stopWaveformOverlay() {
+        if (this._vizCancellable) {
+            this._vizCancellable.cancel();
+            this._vizCancellable = null;
+        }
+        if (this._vizProc) {
+            try { this._vizProc.force_exit(); } catch (_) {}
+            this._vizProc = null;
+        }
+        this._vizInputStream = null;
+
+        if (this._vizDrawId) {
+            GLib.source_remove(this._vizDrawId);
+            this._vizDrawId = null;
+        }
+        if (this._waveformOverlay) {
+            Main.uiGroup.remove_child(this._waveformOverlay);
+            this._waveformOverlay.destroy();
+            this._waveformOverlay = null;
+        }
+        this._waveformArea = null;
+        this._vizAmplitudes = [];
+    }
+
+    _readVizChunk() {
+        if (!this._vizInputStream || !this._vizCancellable)
+            return;
+
+        // 3200 bytes = 1600 samples × 2 bytes (s16le at 16 kHz ≈ 100 ms per bar)
+        this._vizInputStream.read_bytes_async(
+            3200, GLib.PRIORITY_DEFAULT, this._vizCancellable, (stream, res) => {
+                try {
+                    const bytes = stream.read_bytes_finish(res);
+                    if (!bytes || bytes.get_size() === 0)
+                        return;
+
+                    if (this._vizWarmupChunks > 0) {
+                        this._vizWarmupChunks--;
+                    } else {
+                        const rms = this._computeRms(bytes.get_data());
+                        this._vizAmplitudes.push(rms);
+                        if (this._vizAmplitudes.length > WAVEFORM_BARS)
+                            this._vizAmplitudes.shift();
+                    }
+
+                    this._readVizChunk();
+                } catch (_) {
+                    // Cancelled or stream ended — stop gracefully
+                }
+            });
+    }
+
+    _computeRms(u8) {
+        if (!u8 || u8.length < 2)
+            return 0;
+        let sum = 0;
+        const n = Math.floor(u8.length / 2);
+        for (let i = 0; i < n; i++) {
+            let s = (u8[i * 2 + 1] << 8) | u8[i * 2];
+            if (s > 32767)
+                s -= 65536;
+            sum += s * s;
+        }
+        return Math.sqrt(sum / n) / 32768;
+    }
+
+    _drawWaveform(cr, width, height) {
+        // Clear to transparent
+        cr.setOperator(Cairo.Operator.CLEAR);
+        cr.paint();
+        cr.setOperator(Cairo.Operator.OVER);
+
+        // Rounded-rect background
+        const r = 12;
+        cr.newPath();
+        cr.arc(r,         r,          r, Math.PI,       1.5 * Math.PI);
+        cr.arc(width - r, r,          r, 1.5 * Math.PI, 2 * Math.PI);
+        cr.arc(width - r, height - r, r, 0,             0.5 * Math.PI);
+        cr.arc(r,         height - r, r, 0.5 * Math.PI, Math.PI);
+        cr.closePath();
+        cr.setSourceRGBA(0.1, 0.1, 0.1, 0.92);
+        cr.fill();
+
+        // Amplitude bars — symmetric above and below center (Super Whisper style)
+        const barW    = 2;
+        const gap     = 1;
+        const step    = barW + gap;
+        const maxHalfH = Math.floor(height / 2) - 4;
+        const centerY  = height / 2;
+        const nBars    = Math.min(WAVEFORM_BARS, Math.floor((width - 8) / step));
+        const startX   = Math.floor((width - nBars * step + gap) / 2);
+
+        cr.setSourceRGBA(0.9, 0.9, 0.95, 0.9);
+        const amps = this._vizAmplitudes;
+        for (let i = 0; i < nBars; i++) {
+            const amp   = Math.min(1, Math.sqrt(amps[i] || 0));
+            const halfH = Math.max(1, Math.round(amp * maxHalfH));
+            const x     = startX + i * step;
+            cr.rectangle(x, centerY - halfH, barW, halfH * 2);
+            cr.fill();
+        }
     }
 
     /* ────────────────────────────────────────────────────────── */
