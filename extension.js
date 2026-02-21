@@ -108,7 +108,8 @@ export default class WhisperClipboardExtension extends Extension {
         this._vizProc = null;
         this._vizInputStream = null;
         this._vizCancellable = null;
-        this._vizAmplitudes = [];
+        this._targetRms = 0;
+        this._currentRms = 0;
         this._vizDrawId = null;
         this._vizWarmupChunks = 0;
         this._vizMode = 'recording'; // 'recording' | 'transcribing'
@@ -356,7 +357,7 @@ export default class WhisperClipboardExtension extends Extension {
     }
 
     /* ────────────────────────────────────────────────────────── */
-    /*  whisper-server management                                  */
+    /*  whisper-server management                                 */
     /* ────────────────────────────────────────────────────────── */
 
     _getServerPort() {
@@ -496,7 +497,7 @@ export default class WhisperClipboardExtension extends Extension {
     }
 
     /* ────────────────────────────────────────────────────────── */
-    /*  Panel menu                                                 */
+    /*  Panel menu                                                */
     /* ────────────────────────────────────────────────────────── */
 
     _buildMenu() {
@@ -727,7 +728,7 @@ export default class WhisperClipboardExtension extends Extension {
     }
 
     /* ────────────────────────────────────────────────────────── */
-    /*  Model scanner                                              */
+    /*  Model scanner                                             */
     /* ────────────────────────────────────────────────────────── */
 
     _scanModels() {
@@ -768,7 +769,7 @@ export default class WhisperClipboardExtension extends Extension {
     }
 
     /* ────────────────────────────────────────────────────────── */
-    /*  Settings helper                                            */
+    /*  Settings helper                                           */
     /* ────────────────────────────────────────────────────────── */
 
     _getKeybindingSettings() {
@@ -793,7 +794,7 @@ export default class WhisperClipboardExtension extends Extension {
     }
 
     /* ────────────────────────────────────────────────────────── */
-    /*  Toggle logic                                               */
+    /*  Toggle logic                                              */
     /* ────────────────────────────────────────────────────────── */
 
     _toggle() {
@@ -811,7 +812,7 @@ export default class WhisperClipboardExtension extends Extension {
     }
 
     /* ────────────────────────────────────────────────────────── */
-    /*  Recording                                                  */
+    /*  Recording                                                 */
     /* ────────────────────────────────────────────────────────── */
 
     _startRecording() {
@@ -900,7 +901,7 @@ export default class WhisperClipboardExtension extends Extension {
     }
 
     /* ────────────────────────────────────────────────────────── */
-    /*  Stop + transcribe via whisper-server                       */
+    /*  Stop + transcribe via whisper-server                      */
     /* ────────────────────────────────────────────────────────── */
 
     _stopAndTranscribe() {
@@ -979,16 +980,22 @@ export default class WhisperClipboardExtension extends Extension {
                 const bytes = session.send_and_read_finish(res);
                 const status = msg.get_status();
 
+                // Fix: GJS GLib.Bytes.get_data() can return a [Uint8Array, size] tuple
+                let data = bytes.get_data();
+                if (Array.isArray(data)) {
+                    data = data[0];
+                }
+
                 if (status !== Soup.Status.OK) {
                     const decoder = new TextDecoder('utf-8');
-                    const body = decoder.decode(bytes.get_data());
+                    const body = decoder.decode(data);
                     Main.notify('Whisper Clipboard', `Server error (${status}): ${body.substring(0, 120)}`);
                     this._resetIndicator();
                     return;
                 }
 
                 const decoder = new TextDecoder('utf-8');
-                const text = decoder.decode(bytes.get_data()).trim();
+                const text = decoder.decode(data).trim();
 
                 if (text.length === 0) {
                     Main.notify('Whisper Clipboard', 'No text recognized.');
@@ -1029,7 +1036,7 @@ export default class WhisperClipboardExtension extends Extension {
     }
 
     /* ────────────────────────────────────────────────────────── */
-    /*  Auto-paste                                                 */
+    /*  Auto-paste                                                */
     /* ────────────────────────────────────────────────────────── */
 
     _pasteFromClipboard() {
@@ -1057,7 +1064,7 @@ export default class WhisperClipboardExtension extends Extension {
     }
 
     /* ────────────────────────────────────────────────────────── */
-    /*  Waveform overlay                                           */
+    /*  Waveform overlay                                          */
     /* ────────────────────────────────────────────────────────── */
 
     _startWaveformOverlay() {
@@ -1078,7 +1085,8 @@ export default class WhisperClipboardExtension extends Extension {
             // Continue — show overlay without animation
         }
 
-        this._vizAmplitudes = new Array(WAVEFORM_BARS).fill(0);
+        this._targetRms = 0;
+        this._currentRms = 0;
         this._vizWarmupChunks = 10; // discard first ~1 s of ffmpeg startup noise
         this._vizMode = 'recording';
         this._vizPhase = 0;
@@ -1145,7 +1153,8 @@ export default class WhisperClipboardExtension extends Extension {
             this._waveformOverlay = null;
         }
         this._waveformArea = null;
-        this._vizAmplitudes = [];
+        this._targetRms = 0;
+        this._currentRms = 0;
         this._vizMode = 'recording';
         this._vizPhase = 0;
     }
@@ -1167,8 +1176,8 @@ export default class WhisperClipboardExtension extends Extension {
         }
         this._vizInputStream = null;
 
-        // Clear recorded amplitudes and switch to animated mode
-        this._vizAmplitudes = [];
+        this._targetRms = 0;
+        this._currentRms = 0;
         this._vizPhase = 0;
         this._vizMode = 'transcribing';
         // The repaint timer (_vizDrawId) keeps running — the draw function
@@ -1190,10 +1199,14 @@ export default class WhisperClipboardExtension extends Extension {
                     if (this._vizWarmupChunks > 0) {
                         this._vizWarmupChunks--;
                     } else {
-                        const rms = this._computeRms(bytes.get_data());
-                        this._vizAmplitudes.push(rms);
-                        if (this._vizAmplitudes.length > WAVEFORM_BARS)
-                            this._vizAmplitudes.shift();
+                        // Fix: GJS get_data() may return [Uint8Array, size] tuple
+                        let u8 = bytes.get_data();
+                        if (Array.isArray(u8)) {
+                            u8 = u8[0];
+                        }
+
+                        // Capture target RMS; the 60fps draw loop will interpolate smoothly towards it.
+                        this._targetRms = this._computeRms(u8);
                     }
 
                     this._readVizChunk();
@@ -1234,7 +1247,6 @@ export default class WhisperClipboardExtension extends Extension {
         cr.setSourceRGBA(0.1, 0.1, 0.1, 0.92);
         cr.fill();
 
-        // Amplitude bars — symmetric above and below center
         const barW     = 2;
         const gap      = 1;
         const step     = barW + gap;
@@ -1243,31 +1255,62 @@ export default class WhisperClipboardExtension extends Extension {
         const nBars    = Math.min(WAVEFORM_BARS, Math.floor((width - 8) / step));
         const startX   = Math.floor((width - nBars * step + gap) / 2);
 
+        this._vizPhase = (this._vizPhase || 0) + 0.05;
+
         if (this._vizMode === 'transcribing') {
-            // Slow traveling sine² wave — white, same 2px/1px bar density as recording
-            this._vizPhase += 0.05;
-            cr.setSourceRGBA(0.9, 0.9, 0.95, 0.9);
             for (let i = 0; i < nBars; i++) {
-                // sin² gives smooth bell-shaped humps; envelope tapers the edges
-                const s        = Math.sin(i * 0.13 + this._vizPhase);
-                const envelope = Math.sin((i / (nBars - 1)) * Math.PI);
-                const wave     = s * s * envelope;
-                const halfH    = Math.max(1, Math.round(wave * maxHalfH));
-                const x        = startX + i * step;
+                const x = startX + i * step;
+                
+                // Normalized coordinate across the container [0.0 to 1.0]
+                const normI = i / (nBars - 1);
+                
+                // Static envelope keeps the left/right edges forced to height 0
+                const envelope = Math.sin(normI * Math.PI);
+                
+                // Create exactly 3 peaks across the entire width (normI * 3 * PI).
+                // Subtracting a portion of _vizPhase smoothly shifts the peaks left-to-right.
+                const spatial = Math.pow(Math.sin((normI * 3 * Math.PI) - (this._vizPhase * 0.6)), 2);
+                
+                // Subtle breathing effect on the overall height so it feels organic
+                const temporal = 0.8 + 0.2 * Math.sin(this._vizPhase * 0.5);
+                
+                // Combine into final height
+                const wave = spatial * temporal * envelope;
+                const halfH = Math.max(1, Math.round(wave * maxHalfH));
+
+                cr.setSourceRGBA(0.9, 0.9, 0.95, 0.9);
                 cr.rectangle(x, centerY - halfH, barW, halfH * 2);
                 cr.fill();
             }
         } else {
-            // Real amplitude bars with noise gate
+            // Smoothly interpolate current RMS towards the latest target RMS from ffmpeg
+            this._currentRms = (this._currentRms || 0) + ((this._targetRms || 0) - (this._currentRms || 0)) * 0.2;
+
             const NOISE_FLOOR = 0.02;
-            cr.setSourceRGBA(0.9, 0.9, 0.95, 0.9);
-            const amps = this._vizAmplitudes;
+            const gated = Math.max(0, this._currentRms - NOISE_FLOOR);
+            const globalAmp = Math.min(1, Math.sqrt(gated / (1 - NOISE_FLOOR)));
+
             for (let i = 0; i < nBars; i++) {
-                const raw   = amps[i] || 0;
-                const gated = Math.max(0, raw - NOISE_FLOOR);
-                const amp   = Math.min(1, Math.sqrt(gated / (1 - NOISE_FLOOR)));
-                const halfH = Math.max(1, Math.round(amp * maxHalfH));
-                const x     = startX + i * step;
+                const x = startX + i * step;
+                // Envelope makes bars in the center tallest, tapering out at edges
+                const envelope = Math.sin((i / (nBars - 1)) * Math.PI);
+                
+                // Add this._vizPhase to the spatial components so the waveform wiggles horizontally.
+                // It creates overlapping ripples that travel continuously right and left inside the fixed envelope.
+                const spatial = 0.5 
+                              + 0.25 * Math.sin(i * 0.25 - this._vizPhase * 1.2) 
+                              + 0.25 * Math.cos(i * 0.43 + this._vizPhase * 0.8);
+                
+                // Final amplitude for this individual bar
+                const barAmp = globalAmp * spatial * envelope;
+                const halfH = Math.max(1, Math.round(barAmp * maxHalfH));
+
+                // Mapping amplitude to color brightness: lower amplitude -> darker gray, higher -> white
+                // By multiplying by 2.0, peaks become brightly white faster
+                const intensity = Math.min(1, barAmp * 2.0);
+                const cVal = 0.4 + 0.6 * intensity; // 0.4 is dark gray, 1.0 is pure white
+
+                cr.setSourceRGBA(cVal, cVal, cVal, 0.9);
                 cr.rectangle(x, centerY - halfH, barW, halfH * 2);
                 cr.fill();
             }
@@ -1275,7 +1318,7 @@ export default class WhisperClipboardExtension extends Extension {
     }
 
     /* ────────────────────────────────────────────────────────── */
-    /*  Helpers                                                    */
+    /*  Helpers                                                   */
     /* ────────────────────────────────────────────────────────── */
 
     _killRecording() {

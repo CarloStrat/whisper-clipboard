@@ -69,6 +69,8 @@ needed. The HTTP client is libsoup 3.0 (`Soup.Session`), already
 available inside GNOME Shell. One session is created on `enable()` and
 reused for health checks and transcriptions.
 
+*(Note: In GJS, `bytes.get_data()` occasionally returns a `[Uint8Array, size]` tuple depending on the GNOME version. The code safely checks for this to prevent decoding errors).*
+
 ### Language handling
 
 Language is a per-request parameter. The server's `-l` flag sets its
@@ -131,46 +133,46 @@ against Clutter events. Switching between PTT and normal mode is live
 
 ## Waveform overlay
 
-During recording a 350×64 px overlay appears just below the panel, showing
-real-time audio levels as symmetric amplitude bars (2 px wide, 1 px gap).
-
+During recording a 350×64 px overlay appears just below the panel.
 A **second ffmpeg process** is spawned purely for visualization:
 
     ffmpeg -nostdin -f alsa -i default -ar 16000 -ac 1 -f s16le pipe:1
 
-It writes raw signed-16-bit PCM to stdout. The extension reads it in 3 200-byte
-chunks (~100 ms each) via `read_bytes_async`. The first 10 chunks (~1 s) are
-discarded as warmup to avoid the initial ALSA buffer noise showing up as
-saturated bars.
+It writes raw signed-16-bit PCM to stdout. The extension reads it in ~100 ms chunks
+via `read_bytes_async`. The first 10 chunks (~1 s) are discarded as warmup to
+avoid the initial ALSA buffer noise.
 
-### RMS + noise gate
+### Fluid animation & Color Mapping
 
-Each chunk is RMS-averaged over its samples, giving a value in [0, 1].
-A noise floor of 0.02 is subtracted before scaling, so background room
-noise renders as flat (minimum 1 px) bars while speech shows proportionally:
+Each chunk is RMS-averaged over its samples, providing a `_targetRms`.
+To create a fluid, "Siri" or "Super Whisper" aesthetic, the renderer uses a stateless ~60fps loop without scrolling history arrays:
 
-    gated = max(0, rms - 0.02)
-    amp   = sqrt(gated / 0.98)   // sqrt curve for perceptual linearity
+1. **Smooth Interpolation**: `_currentRms` glides towards `_targetRms` rather than snapping instantly.
+2. **Noise Gate**: A noise floor of `0.02` is subtracted before amplitude scaling.
+3. **Static Envelope**: A sine curve forces the outer edges to height zero and the center to be tallest.
+4. **Wiggle / Ripple**: `_vizPhase` is fed into trigonometric functions (`sin` and `cos`) per bar, causing overlapping ripples to flow horizontally within the fixed envelope.
+5. **Color Reactivity**: The color of each individual bar maps dynamically from dark gray (`0.4`) to pure white (`1.0`) based on its instantaneous peak height. The louder you speak, the taller and brighter the bars become.
 
 ### Transcribing animation
 
 When the user stops recording, the audio-capture ffmpeg is killed but the
 overlay stays visible. `_switchWaveformToTranscribing()` sets `_vizMode =
 'transcribing'`. The repaint timer keeps firing and `_drawWaveform()` switches
-to a **sin² traveling wave** (white, same bar density):
+to a smooth, **3-peak sliding wave**.
 
-    wave = sin²(i × 0.13 + phase) × sin(i/nBars × π)   // sin envelope tapers edges
+Instead of real audio data, it computes:
 
-`phase` increments by 0.05 per frame (~60 fps), giving a full cycle roughly
-every 2 seconds. The overlay is removed as soon as transcription completes
-(success or error).
+    envelope = sin(normI × π)
+    spatial  = sin²((normI × 3 × π) - (phase × 0.6))
+    temporal = 0.8 + 0.2 × sin(phase × 0.5)
+
+This math creates exactly 3 symmetric peaks that continuously and gracefully slide from left to right, fading in at the left edge and shrinking out of existence on the right edge. The overlay is removed as soon as transcription completes.
 
 ### Repaint loop
 
 A `GLib.timeout_add(16, …)` (~60 fps) calls `queue_repaint()` on the
 `St.DrawingArea`. Cairo is used for the background rounded-rect and the bars.
-The draw function is completely stateless except for `_vizAmplitudes` and
-`_vizPhase` — no retained Cairo surfaces.
+The draw function is completely stateless except for `_vizPhase`, `_targetRms`, and `_currentRms` — no retained Cairo surfaces or history arrays are kept.
 
 ## Recording timer
 

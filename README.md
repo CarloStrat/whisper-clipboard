@@ -16,6 +16,7 @@ Press the shortcut. Talk. Press it again. Your words appear in the clipboard
 - **Local, private** — no cloud, no account, all inference runs on your machine.
 - **Fast** — `whisper-server` keeps the model in memory between uses. After the
   first load a 10-second clip transcribes in under a second on reasonable hardware.
+- **Fluid UI** — "Super Whisper"-style fluid waveform overlay reacting to your voice dynamically.
 - **Multilingual** — 20 common languages in the menu, auto-detect, or any custom
   language code. Optional translation to English.
 - **Push-to-talk** — hold to record, release to transcribe.
@@ -116,9 +117,8 @@ gnome-extensions enable whisper-clipboard@local
 | Cancel recording | **Shift+Alt+Escape** |
 
 1. Press the shortcut — recording starts, the panel icon turns **red**, a timer
-   appears, and a real-time waveform overlay shows your audio levels below the panel.
-2. Press it again — recording stops, the waveform switches to a smooth animated
-   wave while the audio is being transcribed.
+   appears, and a sleek, real-time waveform overlay appears below the panel. The waveform features a fluid animation where bars stay anchored but ripple horizontally and brighten from gray to white as your voice volume increases.
+2. Press it again — recording stops, the waveform switches to a smooth 3-peak sliding animation while the audio is being transcribed.
 3. Text lands in your clipboard — icon flashes **green** for 3 seconds.
 
 To cancel mid-recording without transcribing, press **Shift+Alt+Escape**.
