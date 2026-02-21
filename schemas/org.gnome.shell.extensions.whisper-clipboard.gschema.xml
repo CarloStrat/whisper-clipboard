@@ -10,7 +10,7 @@
       <description>Start/stop audio recording for whisper transcription</description>
     </key>
     <key name="whisper-cancel-toggle" type="as">
-      <default>['&lt;Shift&gt;&lt;Alt&gt;Escape']</default>
+      <default>['&lt;Shift&gt;&lt;Alt&gt;Delete']</default>
       <summary>Cancel voice recording</summary>
       <description>Cancel ongoing audio recording without transcribing</description>
     </key>
