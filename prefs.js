@@ -8,6 +8,7 @@ import Adw from 'gi://Adw';
 import Gtk from 'gi://Gtk';
 import Gdk from 'gi://Gdk';
 import Gio from 'gi://Gio';
+import GLib from 'gi://GLib';
 import GObject from 'gi://GObject';
 import {ExtensionPreferences} from 'resource:///org/gnome/Shell/Extensions/js/extensions/prefs.js';
 
@@ -33,6 +34,45 @@ const LANGUAGES = [
     {code: 'fi', label: 'Finnish'},
     {code: 'ro', label: 'Romanian'},
 ];
+
+/* ── Model scanner (mirrors extension.js logic, runs in prefs process) ── */
+
+const MODEL_SEARCH_DIRS = [
+    `${GLib.get_home_dir()}/.local/share/whisper/models`,
+    `${GLib.get_home_dir()}/whisper.cpp/models`,
+    '/opt/whisper.cpp/models',
+    '/usr/share/whisper.cpp/models',
+    '/usr/local/share/whisper/models',
+];
+
+function scanModels(settings) {
+    const seen = new Set();
+    const models = [];
+    const customDir = settings.get_string('whisper-models-dir').trim();
+    const searchDirs = [...(customDir ? [customDir] : []), ...MODEL_SEARCH_DIRS];
+    for (const dirPath of searchDirs) {
+        try {
+            const dir = Gio.File.new_for_path(dirPath);
+            const enumerator = dir.enumerate_children(
+                'standard::name,standard::type', Gio.FileQueryInfoFlags.NONE, null,
+            );
+            let info;
+            while ((info = enumerator.next_file(null)) !== null) {
+                const name = info.get_name();
+                if (name.startsWith('ggml-') && name.endsWith('.bin')) {
+                    const fullPath = GLib.build_filenamev([dirPath, name]);
+                    if (!seen.has(fullPath)) {
+                        seen.add(fullPath);
+                        models.push(fullPath);
+                    }
+                }
+            }
+            enumerator.close(null);
+        } catch (_) { /* dir may not exist */ }
+    }
+    models.sort();
+    return models;
+}
 
 /* ── Shortcut capture row ── */
 
@@ -299,27 +339,105 @@ export default class WhisperClipboardPreferences extends ExtensionPreferences {
         });
         serverPage.add(serverGroup);
 
-        // Model path — apply on Enter / focus-out
+        // ── Model selection ──
+        const discoveredModels = scanModels(settings);
+        let modelComboRow = null;
+
+        // Model path text entry (with file picker)
         const modelRow = new Adw.EntryRow({
             title: 'Model path',
             text: settings.get_string('whisper-model'),
             show_apply_button: true,
         });
+
+        const modelFileBtn = new Gtk.Button({
+            icon_name: 'document-open-symbolic',
+            valign: Gtk.Align.CENTER,
+            css_classes: ['flat'],
+            tooltip_text: 'Browse for model file',
+        });
+        modelFileBtn.connect('clicked', () => {
+            const dialog = new Gtk.FileDialog({title: 'Select Model File', modal: true});
+            const filter = new Gtk.FileFilter();
+            filter.add_pattern('*.bin');
+            filter.set_name('Whisper models (*.bin)');
+            dialog.set_default_filter(filter);
+            const current = settings.get_string('whisper-model');
+            if (current)
+                dialog.set_initial_folder(Gio.File.new_for_path(GLib.path_get_dirname(current)));
+            dialog.open(window, null, (d, res) => {
+                try { settings.set_string('whisper-model', d.open_finish(res).get_path()); }
+                catch (_) {}
+            });
+        });
+        modelRow.add_suffix(modelFileBtn);
+
         modelRow.connect('apply', () => {
             settings.set_string('whisper-model', modelRow.get_text());
         });
+
         settings.connect('changed::whisper-model', () => {
-            if (modelRow.get_text() !== settings.get_string('whisper-model'))
-                modelRow.set_text(settings.get_string('whisper-model'));
+            const path = settings.get_string('whisper-model');
+            if (modelRow.get_text() !== path)
+                modelRow.set_text(path);
+            if (modelComboRow) {
+                const idx = discoveredModels.indexOf(path);
+                if (idx >= 0 && modelComboRow.get_selected() !== idx)
+                    modelComboRow.set_selected(idx);
+            }
         });
+
+        // Discovered models combo (quick picker shown above the text entry)
+        if (discoveredModels.length > 0) {
+            const namesList = new Gtk.StringList();
+            discoveredModels.forEach(p => namesList.append(GLib.path_get_basename(p)));
+
+            modelComboRow = new Adw.ComboRow({
+                title: 'Select model',
+                subtitle: 'Models discovered in standard locations',
+                model: namesList,
+            });
+
+            const initIdx = discoveredModels.indexOf(settings.get_string('whisper-model'));
+            if (initIdx >= 0)
+                modelComboRow.set_selected(initIdx);
+
+            modelComboRow.connect('notify::selected', () => {
+                const i = modelComboRow.get_selected();
+                if (i >= 0 && i < discoveredModels.length)
+                    settings.set_string('whisper-model', discoveredModels[i]);
+            });
+
+            serverGroup.add(modelComboRow);
+        }
+
         serverGroup.add(modelRow);
 
-        // Extra models directory
+        // Extra models directory (with folder picker)
         const modelsDirRow = new Adw.EntryRow({
             title: 'Extra models directory',
             text: settings.get_string('whisper-models-dir'),
             show_apply_button: true,
         });
+
+        const modelsDirBtn = new Gtk.Button({
+            icon_name: 'folder-open-symbolic',
+            valign: Gtk.Align.CENTER,
+            css_classes: ['flat'],
+            tooltip_text: 'Browse for models directory',
+        });
+        modelsDirBtn.connect('clicked', () => {
+            const dialog = new Gtk.FileDialog({title: 'Select Models Directory', modal: true});
+            const current = settings.get_string('whisper-models-dir');
+            if (current)
+                dialog.set_initial_folder(Gio.File.new_for_path(current));
+            dialog.select_folder(window, null, (d, res) => {
+                try { settings.set_string('whisper-models-dir', d.select_folder_finish(res).get_path()); }
+                catch (_) {}
+            });
+        });
+        modelsDirRow.add_suffix(modelsDirBtn);
+
         modelsDirRow.connect('apply', () => {
             settings.set_string('whisper-models-dir', modelsDirRow.get_text());
         });
@@ -329,12 +447,31 @@ export default class WhisperClipboardPreferences extends ExtensionPreferences {
         });
         serverGroup.add(modelsDirRow);
 
-        // whisper-server binary override
+        // whisper-server binary override (with file picker)
         const binRow = new Adw.EntryRow({
             title: 'whisper-server binary',
             text: settings.get_string('whisper-server-bin'),
             show_apply_button: true,
         });
+
+        const binFileBtn = new Gtk.Button({
+            icon_name: 'document-open-symbolic',
+            valign: Gtk.Align.CENTER,
+            css_classes: ['flat'],
+            tooltip_text: 'Browse for whisper-server binary',
+        });
+        binFileBtn.connect('clicked', () => {
+            const dialog = new Gtk.FileDialog({title: 'Select whisper-server Binary', modal: true});
+            const current = settings.get_string('whisper-server-bin');
+            if (current)
+                dialog.set_initial_folder(Gio.File.new_for_path(GLib.path_get_dirname(current)));
+            dialog.open(window, null, (d, res) => {
+                try { settings.set_string('whisper-server-bin', d.open_finish(res).get_path()); }
+                catch (_) {}
+            });
+        });
+        binRow.add_suffix(binFileBtn);
+
         binRow.connect('apply', () => {
             settings.set_string('whisper-server-bin', binRow.get_text());
         });
@@ -362,5 +499,65 @@ export default class WhisperClipboardPreferences extends ExtensionPreferences {
             portRow.set_value(settings.get_int('server-port'));
         });
         serverGroup.add(portRow);
+
+        /* ════════════════════════════════ History page ══ */
+        const historyPage = new Adw.PreferencesPage({
+            title: 'History',
+            icon_name: 'document-open-recent-symbolic',
+        });
+        window.add(historyPage);
+
+        let currentHistoryGroup = null;
+
+        const buildHistoryPage = () => {
+            if (currentHistoryGroup)
+                historyPage.remove(currentHistoryGroup);
+
+            const entries = settings.get_strv('history').slice().reverse(); // most-recent first
+
+            currentHistoryGroup = new Adw.PreferencesGroup();
+
+            if (entries.length === 0) {
+                const emptyRow = new Adw.ActionRow({
+                    title: 'No transcriptions yet',
+                    sensitive: false,
+                });
+                currentHistoryGroup.add(emptyRow);
+            } else {
+                const clearBtn = new Gtk.Button({
+                    label: 'Clear All',
+                    css_classes: ['destructive-action'],
+                    valign: Gtk.Align.CENTER,
+                });
+                clearBtn.connect('clicked', () => settings.set_strv('history', []));
+                currentHistoryGroup.set_header_suffix(clearBtn);
+
+                for (const text of entries) {
+                    const preview = text.length > 120
+                        ? `${text.substring(0, 120)}…`
+                        : text;
+                    const row = new Adw.ActionRow({
+                        title: GLib.markup_escape_text(preview, -1),
+                        activatable: true,
+                    });
+                    row.add_suffix(new Gtk.Image({
+                        icon_name: 'edit-copy-symbolic',
+                        valign: Gtk.Align.CENTER,
+                        css_classes: ['dim-label'],
+                    }));
+                    row.connect('activated', () => {
+                        Gdk.Display.get_default().get_clipboard().set_content(
+                            Gdk.ContentProvider.new_for_value(text));
+                        window.add_toast(new Adw.Toast({title: 'Copied to clipboard'}));
+                    });
+                    currentHistoryGroup.add(row);
+                }
+            }
+
+            historyPage.add(currentHistoryGroup);
+        };
+
+        buildHistoryPage();
+        settings.connect('changed::history', buildHistoryPage);
     }
 }
