@@ -59,6 +59,9 @@ const LANGUAGES = [
     {code: 'ro', label: 'Romanian'},
 ];
 
+// Pre-built set for O(1) lookups in _populateLanguageMenu
+const KNOWN_LANG_CODES = new Set(LANGUAGES.map(l => l.code));
+
 const WHISPER_SERVER_CANDIDATES = [
     `${GLib.get_home_dir()}/.local/bin/whisper-server`,
     `${GLib.get_home_dir()}/whisper.cpp/build/bin/whisper-server`,
@@ -604,7 +607,6 @@ export default class WhisperClipboardExtension extends Extension {
         this._langSubmenu.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
 
         // Known languages
-        const knownCodes = new Set(LANGUAGES.map(l => l.code));
         for (const {code, label} of LANGUAGES) {
             const item = new PopupMenu.PopupMenuItem(label);
             item.setOrnament(!autoDetect && code === currentLang
@@ -631,7 +633,7 @@ export default class WhisperClipboardExtension extends Extension {
             x_expand: true,
         });
         // Pre-fill if current language is non-standard
-        if (!autoDetect && !knownCodes.has(currentLang) && currentLang)
+        if (!autoDetect && !KNOWN_LANG_CODES.has(currentLang) && currentLang)
             customEntry.set_text(currentLang);
 
         customEntry.get_clutter_text().connect('activate', () => {
@@ -683,7 +685,7 @@ export default class WhisperClipboardExtension extends Extension {
         }
 
         // Show most-recent first
-        for (const {text, timestamp} of [...this._history].reverse()) {
+        for (const text of [...this._history].reverse()) {
             const preview = text.length > 60
                 ? `${text.substring(0, 60)}…`
                 : text;
@@ -825,7 +827,6 @@ export default class WhisperClipboardExtension extends Extension {
             Main.notify('Whisper Clipboard', 'Recording started…');
         } catch (e) {
             Main.notify('Whisper Clipboard', `Failed to start recording: ${e.message}`);
-            this._state = State.IDLE;
             this._resetIndicator();
         }
     }
@@ -835,7 +836,6 @@ export default class WhisperClipboardExtension extends Extension {
             return;
 
         this._killRecording();
-        this._stopTimer();
         this._resetIndicator();
 
         try { GLib.unlink(this._wavPath); } catch (_) {}
@@ -980,7 +980,7 @@ export default class WhisperClipboardExtension extends Extension {
 
                 // Save to history
                 const maxHistory = this._settings.get_int('history-size');
-                this._history.push({text, timestamp: new Date().toISOString()});
+                this._history.push(text);
                 if (this._history.length > maxHistory)
                     this._history.shift();
 
