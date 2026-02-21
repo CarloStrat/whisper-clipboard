@@ -59,7 +59,7 @@ State transitions are driven by `_toggle()`, which dispatches to `_startRecordin
 
 ### Key Subsystems
 
-**Whisper server**: a persistent `whisper-server` process is managed by the extension (auto-started, health-checked). Transcription requests are multipart POSTs to `http://127.0.0.1:{port}/inference` via `Soup`. The server is auto-detected from PATH or common install locations, configurable via GSettings.
+**Whisper server**: a persistent `whisper-server` process is managed by the extension (auto-started, health-checked). Transcription requests are multipart POSTs to `http://{host}:{port}/inference` via `Soup`. The server is auto-detected from PATH or common install locations, configurable via GSettings. When `server-host` is set to a non-local value (not `127.0.0.1` / `localhost`), the extension skips spawning a local process and connects directly to the remote host.
 
 **Audio recording**: spawns `ffmpeg` writing to `/tmp/whisper_clip_recording.wav`. Stopped by sending SIGINT.
 
@@ -87,6 +87,7 @@ State transitions are driven by `_toggle()`, which dispatches to `_startRecordin
 | `whisper-model` | `s` | | Model file path |
 | `whisper-models-dir` | `s` | | Extra model scan directory |
 | `whisper-server-bin` | `s` | | Server binary path override |
+| `server-host` | `s` | `127.0.0.1` | Server host (IP or hostname); non-local skips local spawn |
 | `server-port` | `i` | `8178` | Server port |
 | `auto-paste` | `b` | `false` | Auto-paste after transcription |
 | `paste-use-ctrl-shift-v` | `b` | `false` | Use Ctrl+Shift+V for paste |

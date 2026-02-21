@@ -174,6 +174,11 @@ export default class WhisperClipboardExtension extends Extension {
         });
         this._initKeybinding();
 
+        /* ── react to server-host changes ── */
+        this._serverHostChangedId = this._settings.connect('changed::server-host', () => {
+            this._restartServer();
+        });
+
         /* ── start whisper-server ── */
         this._startServer();
     }
@@ -183,6 +188,11 @@ export default class WhisperClipboardExtension extends Extension {
         if (this._pttChangedId && this._settings) {
             this._settings.disconnect(this._pttChangedId);
             this._pttChangedId = null;
+        }
+
+        if (this._serverHostChangedId && this._settings) {
+            this._settings.disconnect(this._serverHostChangedId);
+            this._serverHostChangedId = null;
         }
 
         if (this._settings && this._settings.get_boolean('push-to-talk')) {
@@ -361,12 +371,22 @@ export default class WhisperClipboardExtension extends Extension {
     /*  whisper-server management                                 */
     /* ────────────────────────────────────────────────────────── */
 
+    _getServerHost() {
+        const host = this._settings.get_string('server-host').trim();
+        return host || '127.0.0.1';
+    }
+
+    _isLocalHost() {
+        const h = this._getServerHost();
+        return h === '127.0.0.1' || h === 'localhost';
+    }
+
     _getServerPort() {
         return this._settings.get_int('server-port');
     }
 
     _getServerUrl(path) {
-        return `http://127.0.0.1:${this._getServerPort()}${path}`;
+        return `http://${this._getServerHost()}:${this._getServerPort()}${path}`;
     }
 
     _resolveWhisperBin() {
@@ -389,6 +409,13 @@ export default class WhisperClipboardExtension extends Extension {
     _startServer() {
         if (this._serverSubprocess)
             return;
+
+        // Remote host: skip local process, just poll health directly
+        if (!this._isLocalHost()) {
+            this._serverReady = false;
+            this._pollHealth();
+            return;
+        }
 
         const whisperBin = this._resolveWhisperBin();
         if (!whisperBin) {

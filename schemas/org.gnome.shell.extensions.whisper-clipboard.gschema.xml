@@ -48,6 +48,11 @@
       <summary>Path to whisper-server binary</summary>
       <description>Full path to the whisper-server binary. Leave empty to auto-detect from PATH and common locations.</description>
     </key>
+    <key name="server-host" type="s">
+      <default>'127.0.0.1'</default>
+      <summary>Whisper server host</summary>
+      <description>IP address or hostname of the whisper-server. Use 127.0.0.1 for the local auto-managed server, or set a remote host to connect to an external whisper-server without spawning a local process.</description>
+    </key>
     <key name="server-port" type="i">
       <default>8178</default>
       <summary>Whisper server port</summary>

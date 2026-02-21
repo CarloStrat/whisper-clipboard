@@ -516,6 +516,21 @@ export default class WhisperClipboardPreferences extends ExtensionPreferences {
         });
         serverGroup.add(binRow);
 
+        // Server host
+        const hostRow = new Adw.EntryRow({
+            title: 'Server host',
+            text: settings.get_string('server-host'),
+            show_apply_button: true,
+        });
+        hostRow.connect('apply', () => {
+            settings.set_string('server-host', hostRow.get_text().trim() || '127.0.0.1');
+        });
+        settings.connect('changed::server-host', () => {
+            if (hostRow.get_text() !== settings.get_string('server-host'))
+                hostRow.set_text(settings.get_string('server-host'));
+        });
+        serverGroup.add(hostRow);
+
         // Server port
         const portRow = new Adw.SpinRow({
             title: 'Server port',
