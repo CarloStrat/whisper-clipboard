@@ -162,21 +162,6 @@ An `St.Icon` in a `PanelMenu.Button`. The icon changes to reflect state:
 
 The success state lasts 3 seconds, then resets to idle.
 
-## What about real-time transcription?
-
-whisper.cpp has a `whisper-stream` binary that does continuous
-transcription from a microphone. It's not used here because:
-
-1. It requires SDL2 and a separate build flag (`-DWHISPER_SDL2=ON`).
-2. It's described in the whisper.cpp repo as a "naive proof of concept".
-3. It hallucates during silence.
-4. The architecture would be completely different -- a long-running
-   process with continuous output instead of a request/response cycle.
-
-The server approach is fast enough. Once the model is loaded, a
-10-second clip transcribes in well under a second. The bottleneck was
-always model loading, and the server eliminates that.
-
 ## File layout
 
     extension.js     -- the entire extension
