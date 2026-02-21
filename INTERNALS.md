@@ -7,47 +7,46 @@ How Whisper Clipboard works, and why it's built the way it is.
 You want to talk and have the text show up where you're typing. This
 means: record audio, transcribe it, put the result in the clipboard,
 and optionally paste it. All of this has to happen inside a GNOME Shell
-extension, which is a constrained environment -- single-threaded,
-no Node, no Python, just GJS and whatever GObject Introspection gives
-you.
+extension, which is a constrained environment — single-threaded, no Node,
+no Python, just GJS and whatever GObject Introspection gives you.
 
 ## Architecture
 
-One file: `extension.js`. One class: `WhisperClipboardExtension`. Three
-states:
+Two files: `extension.js` (the extension itself) and `prefs.js` (the
+preferences UI). One class per file. Three states:
 
-    IDLE -> RECORDING -> TRANSCRIBING -> IDLE
+    IDLE → RECORDING → TRANSCRIBING → IDLE
 
-A keyboard shortcut toggles between them. The `_toggle()` method is the
-dispatcher. That's the whole control flow.
+A keyboard shortcut toggles between them. `_toggle()` is the dispatcher.
+In push-to-talk mode, the shortcut key-press starts recording and the
+key-release stops it — same states, different trigger.
 
 ## The server approach
 
 The first version spawned `whisper-cli` on every transcription. This
-works, but it's slow -- the model has to load from disk every time.
-A 500MB model takes 1-2 seconds just to load before it even starts
-inference.
+works but it's slow — a 500 MB model takes 1-2 seconds to load before
+inference even starts.
 
 The fix is `whisper-server`. It's an HTTP server that comes with
-whisper.cpp. You start it once, the model loads once, and then you POST
-audio files to it. The model sits in memory between requests.
+whisper.cpp. Start it once, the model loads once, then POST audio files
+to it as needed. The model stays in memory between requests.
 
 On `enable()`, the extension spawns:
 
     whisper-server -m <model> -l <lang> --host 127.0.0.1 --port 8178
 
 On `disable()`, it kills the process. The server is fully managed by the
-extension lifecycle.
+extension lifecycle. The port and binary path are configurable via GSettings.
 
 ### Health checking
 
 The server takes a few seconds to load the model. During this time,
-recording is blocked -- pressing the shortcut shows "Server is still
-starting" instead of silently failing.
+recording is blocked — pressing the shortcut shows "Server is still
+starting" rather than silently failing.
 
-The extension polls `GET /health` every second after spawning the
-server. When it gets a 200, it sets `_serverReady = true` and updates
-the panel menu to show "Server: Ready".
+The extension polls `GET /health` every second after spawning the server.
+When it gets a 200, it sets `_serverReady = true` and updates the panel
+menu to show "Server: Ready".
 
 ### Transcription
 
@@ -59,23 +58,33 @@ multipart form data:
 
     file=<recording.wav>
     response_format=text
-    language=it
+    language=en          (or 'auto' for auto-detect)
+    translate=true       (optional, when translate-to-english is on)
     temperature=0.0
+    temperature_inc=0.2
     no_timestamps=true
 
-The response body is the transcribed text, plain. No JSON parsing
-needed when you use `response_format=text`.
-
-The HTTP client is libsoup 3.0 (`Soup.Session`), which is already
-available in GNOME Shell. A single session is created on `enable()` and
+`response_format=text` returns a plain text body with no JSON parsing
+needed. The HTTP client is libsoup 3.0 (`Soup.Session`), already
+available inside GNOME Shell. One session is created on `enable()` and
 reused for health checks and transcriptions.
+
+### Language handling
+
+Language is a per-request parameter. The server's `-l` flag sets its
+default, but the `language` form field in each request overrides it.
+This means:
+
+- **Specific language**: sends `language=<code>` and restarts the server
+  so its default matches (cosmetic consistency).
+- **Auto-detect**: sends `language=auto`, no server restart needed.
+- **Custom code**: same as specific language, type any whisper-supported code.
 
 ### Server restart
 
 When the user changes language or model from the panel menu, the server
-needs to restart with different flags. `_restartServer()` calls
-`force_exit()` on the subprocess, then spawns a new one. The health
-poll kicks in again.
+restarts with new flags. `_restartServer()` calls `force_exit()` on the
+subprocess, then spawns a new one, and the health poll kicks in again.
 
 ## Recording
 
@@ -83,19 +92,64 @@ Recording uses ffmpeg via `Gio.Subprocess`:
 
     ffmpeg -y -f alsa -i default -ar 16000 -ac 1 /tmp/whisper_clip_recording.wav
 
-16kHz mono is what whisper expects. The `-y` flag overwrites without
-asking.
+16 kHz mono is what Whisper expects. `-y` overwrites without asking.
 
-To stop recording, the extension sends SIGINT (signal 2) to the ffmpeg
-process, then waits for it to exit. SIGINT makes ffmpeg finalize the WAV
-header properly -- SIGTERM or SIGKILL would leave a corrupt file.
+### Stopping cleanly
+
+To stop recording, the extension sends SIGINT (signal 2) to ffmpeg. SIGINT
+makes ffmpeg finalize the WAV header before exiting — SIGTERM or SIGKILL
+would leave the file truncated and unreadable.
+
+The stop sequence is async (`wait_async`) so it doesn't block the main
+GNOME Shell thread:
+
+1. The UI flips to TRANSCRIBING immediately (icon + notification).
+2. SIGINT is sent to ffmpeg.
+3. `wait_async` callback fires when ffmpeg exits.
+4. The WAV is read and POSTed to whisper-server.
+
+### Cancel
+
+`_cancelRecording()` is bound to the cancel shortcut (default
+`Shift+Alt+Escape`). It sends SIGINT, calls `force_exit()` for good
+measure, deletes the WAV file, and resets to IDLE — no transcription
+happens.
+
+## Push-to-talk
+
+Push-to-talk replaces `Main.wm.addKeybinding` with raw key events on
+`global.stage`. When enabled:
+
+- `key-press-event` → `_startRecording()` (guarded against key-repeat
+  with a `_pttActive` flag)
+- `key-release-event` → `_stopAndTranscribe()`
+
+`_parseAccelerator()` manually parses GSettings accel strings like
+`<Shift><Alt>space` into a keyval + modifier bitmask for comparison
+against Clutter events. Switching between PTT and normal mode is live
+(no restart needed), driven by the `changed::push-to-talk` signal.
+
+## Recording timer
+
+The panel indicator is an `St.BoxLayout` containing an `St.Icon` and an
+`St.Label`. The label is hidden at idle. When recording starts,
+`GLib.timeout_add_seconds` fires every second and updates the label
+with `M:SS` elapsed time. The timeout is removed on stop, cancel, or
+disable.
+
+## Transcription history
+
+`this._history` is an in-memory array of `{text, timestamp}` objects,
+capped at `history-size` (GSettings, default 10). After each successful
+transcription the text is pushed to the array. The History submenu
+rebuilds itself on open (most-recent first). Clicking an entry
+re-copies the text to the clipboard.
 
 ## Auto-paste
 
-After the text lands in the clipboard, the user still has to Ctrl+V
-manually. Auto-paste removes that step.
-
-The mechanism is Clutter's virtual input device API. On `enable()`:
+After the text lands in the clipboard, the user would normally Ctrl+V
+manually. Auto-paste removes that step using Clutter's virtual input
+device API:
 
 ```js
 const seat = Clutter.get_default_backend().get_default_seat();
@@ -104,11 +158,11 @@ this._virtualDevice = seat.create_virtual_device(
 );
 ```
 
-This gives you a virtual keyboard that can inject key events into the
-compositor. It's the same API that GNOME's on-screen keyboard uses.
-Works on both Wayland and X11 -- no xdotool, no ydotool, no DBus hacks.
+This gives you a virtual keyboard that injects key events into the
+compositor. Same API that GNOME's on-screen keyboard uses. Works on
+Wayland and X11 — no xdotool, no ydotool, no DBus hacks.
 
-To paste, the extension simulates Ctrl+V:
+To paste, the extension simulates Ctrl+V (or Ctrl+Shift+V for terminals):
 
 ```js
 this._virtualDevice.notify_keyval(t,        Clutter.KEY_Control_L, Clutter.KeyState.PRESSED);
@@ -117,55 +171,61 @@ this._virtualDevice.notify_keyval(t + 2000, Clutter.KEY_v,         Clutter.KeySt
 this._virtualDevice.notify_keyval(t + 4000, Clutter.KEY_Control_L, Clutter.KeyState.RELEASED);
 ```
 
-The timestamps are in microseconds and must be monotonically increasing.
-We use `GLib.get_monotonic_time()` as the base and add small offsets.
+Timestamps are in microseconds, monotonically increasing.
+There's a 100 ms delay between setting the clipboard and sending
+keystrokes — without it some apps read a stale clipboard value.
 
-There's a 100ms delay between setting the clipboard and sending the
-keystrokes. Without it, some apps read the clipboard before it's
-actually been updated.
+## Preferences
 
-### Terminal support
+`prefs.js` exports `ExtensionPreferences` and is loaded by GNOME Shell
+in a separate process when the user opens preferences. It uses
+libadwaita (Adw) and GTK4.
 
-Terminals use Ctrl+Shift+V instead of Ctrl+V. A toggle in the menu
-switches between the two. When enabled, a Shift press/release gets
-inserted around the V key events. This is a manual toggle, not
-auto-detection -- detecting whether the focused window is a terminal is
-unreliable and not worth the complexity.
+The `ShortcutRow` widget shows the current keybinding as a
+`Gtk.ShortcutLabel`. Clicking it opens a floating `Gtk.Window` that
+captures the next key combination via `Gtk.EventControllerKey`.
 
 ## Settings
 
-Everything lives in GSettings under
-`org.gnome.shell.extensions.whisper-clipboard`:
+Everything in GSettings under `org.gnome.shell.extensions.whisper-clipboard`:
 
-| Key                        | Type     | Default                              |
-|----------------------------|----------|--------------------------------------|
-| `whisper-clipboard-toggle` | `as`     | `['<Shift><Alt>space']`              |
-| `whisper-language`         | `s`      | `it`                                 |
-| `whisper-model`            | `s`      | `/opt/whisper.cpp/models/ggml-small.bin` |
-| `auto-paste`               | `b`      | `false`                              |
-| `paste-use-ctrl-shift-v`   | `b`      | `false`                              |
-| `server-port`              | `i`      | `8178`                               |
-
-The schema is compiled by `install.sh` and loaded from the extension
-directory at runtime.
+| Key | Type | Default |
+|---|---|---|
+| `whisper-clipboard-toggle` | `as` | `['<Shift><Alt>space']` |
+| `whisper-cancel-toggle` | `as` | `['<Shift><Alt>Escape']` |
+| `whisper-language` | `s` | `'en'` |
+| `auto-detect-language` | `b` | `false` |
+| `translate-to-english` | `b` | `false` |
+| `whisper-model` | `s` | `'/opt/whisper.cpp/models/ggml-small.bin'` |
+| `whisper-models-dir` | `s` | `''` |
+| `whisper-server-bin` | `s` | `''` |
+| `server-port` | `i` | `8178` |
+| `auto-paste` | `b` | `false` |
+| `paste-use-ctrl-shift-v` | `b` | `false` |
+| `history-size` | `i` | `10` |
+| `push-to-talk` | `b` | `false` |
 
 ## Panel indicator
 
-An `St.Icon` in a `PanelMenu.Button`. The icon changes to reflect state:
+`St.BoxLayout` → `St.Icon` + `St.Label` (timer), inside a
+`PanelMenu.Button`. The icon name and CSS class change to reflect state:
 
-| State        | Icon                          | CSS class               |
-|--------------|-------------------------------|-------------------------|
-| Idle         | hearing-symbolic              | (none)                  |
-| Recording    | media-record-symbolic         | whisper-icon-recording  |
-| Transcribing | screen-reader-symbolic        | whisper-icon-transcribing |
-| Success      | object-select-symbolic        | whisper-icon-success    |
+| State | Icon | CSS class |
+|---|---|---|
+| Idle | `audio-input-microphone-symbolic` | — |
+| Recording | `media-record-symbolic` | `whisper-icon-recording` (red) |
+| Transcribing | `emblem-synchronizing-symbolic` | `whisper-icon-transcribing` (orange) |
+| Success | `object-select-symbolic` | `whisper-icon-success` (green) |
 
-The success state lasts 3 seconds, then resets to idle.
+The success state lasts 3 seconds, then resets to idle. If a new
+recording is started while the success indicator is still showing,
+the pending timeout is cancelled immediately.
 
 ## File layout
 
-    extension.js     -- the entire extension
-    metadata.json    -- GNOME Shell extension metadata
-    stylesheet.css   -- icon colors for recording/transcribing/success states
-    install.sh       -- compiles schemas and copies files to the extensions dir
-    schemas/         -- GSettings schema XML + compiled binary
+    extension.js     — the extension: state machine, recording, server, menu
+    prefs.js         — preferences UI (Adw/GTK4, separate process)
+    metadata.json    — GNOME Shell extension metadata
+    stylesheet.css   — icon colors + timer label style
+    install.sh       — compiles schemas, copies files to the extensions dir
+    schemas/         — GSettings schema XML + compiled binary

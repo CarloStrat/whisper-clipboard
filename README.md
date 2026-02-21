@@ -1,170 +1,208 @@
 # Whisper Clipboard
 
 A GNOME Shell extension that records audio, transcribes it locally using
-whisper.cpp, and puts the text in your clipboard. Optionally pastes it
-into the focused window.
+[whisper.cpp](https://github.com/ggerganov/whisper.cpp), and puts the text
+in your clipboard — optionally pasting it straight into the focused window.
 
-Works on GNOME 49. Wayland and X11.
+Works on **GNOME 49**. Wayland and X11.
+
+---
 
 ## What it does
 
-Press a keyboard shortcut. Talk. Press it again. Your words appear in
-the clipboard (and optionally get pasted where your cursor is).
+Press the shortcut. Talk. Press it again. Your words appear in the clipboard
+(and optionally get pasted where your cursor is).
 
-Transcription runs locally via `whisper-server` — the model stays in
-memory between uses, so after the first load there is no startup cost.
-A 10-second recording transcribes in under a second on reasonable
-hardware.
+- **Local, private** — no cloud, no account, all inference runs on your machine.
+- **Fast** — `whisper-server` keeps the model in memory between uses. After the
+  first load a 10-second clip transcribes in under a second on reasonable hardware.
+- **Multilingual** — 20 common languages in the menu, auto-detect, or any custom
+  language code. Optional translation to English.
+- **Push-to-talk** — hold to record, release to transcribe.
+- **History** — last N transcriptions in the panel menu, click to re-copy.
 
 ---
 
 ## Dependencies
 
-- **ffmpeg** — audio capture
-- **whisper-server** — from [whisper.cpp](https://github.com/ggerganov/whisper.cpp)
-- A **GGML model file** (downloaded separately)
+| Dependency | What for |
+|---|---|
+| **ffmpeg** | Audio capture |
+| **whisper-server** | Transcription (from whisper.cpp) |
+| A **GGML model file** | The actual speech recognition weights |
 
-Install `ffmpeg` from your distro:
+### Install ffmpeg
 
-    # Fedora
-    sudo dnf install ffmpeg
+```bash
+# Fedora
+sudo dnf install ffmpeg
 
-    # Ubuntu/Debian
-    sudo apt install ffmpeg
+# Ubuntu / Debian
+sudo apt install ffmpeg
+```
 
----
+### Build whisper-server
 
-## Install whisper.cpp
+#### Option A — user install (recommended, no root)
 
-You need to build `whisper-server` from source. Choose one of these approaches:
+```bash
+git clone https://github.com/ggerganov/whisper.cpp ~/whisper.cpp
+cd ~/whisper.cpp
+cmake -B build
+cmake --build build --config Release --target whisper-server -j$(nproc)
 
-### Option A — user install (no root required, recommended)
+mkdir -p ~/.local/bin
+ln -s ~/whisper.cpp/build/bin/whisper-server ~/.local/bin/whisper-server
+```
 
-Build into your home directory and symlink the binary to `~/.local/bin/`:
+Make sure `~/.local/bin` is in `$PATH` (`which whisper-server` should work).
 
-    git clone https://github.com/ggerganov/whisper.cpp ~/whisper.cpp
-    cd ~/whisper.cpp
-    cmake -B build
-    cmake --build build --config Release --target whisper-server -j$(nproc)
+#### Option B — system install
 
-    mkdir -p ~/.local/bin
-    ln -s ~/whisper.cpp/build/bin/whisper-server ~/.local/bin/whisper-server
+```bash
+git clone https://github.com/ggerganov/whisper.cpp
+cd whisper.cpp
+cmake -B build
+cmake --build build --config Release --target whisper-server -j$(nproc)
+sudo cp build/bin/whisper-server /usr/local/bin/whisper-server
+```
 
-Make sure `~/.local/bin` is in your `$PATH` (it usually is by default on
-Fedora/Ubuntu). You can verify with:
+### Download a model
 
-    which whisper-server
+The `small` model (~500 MB) is a good balance of speed and accuracy:
 
-### Option B — system install
+```bash
+cd ~/whisper.cpp
+bash models/download-ggml-model.sh small
+```
 
-    git clone https://github.com/ggerganov/whisper.cpp
-    cd whisper.cpp
-    cmake -B build
-    cmake --build build --config Release --target whisper-server -j$(nproc)
-    sudo cp build/bin/whisper-server /usr/local/bin/whisper-server
+Or download manually from [HuggingFace](https://huggingface.co/ggerganov/whisper.cpp)
+and drop the `.bin` file into any of these locations (all are scanned automatically):
 
-### Option C — existing `/opt/whisper.cpp` install
-
-If you already built whisper.cpp in `/opt/whisper.cpp` (or similar) and own
-the files, add a symlink instead of chowning the directory:
-
-    mkdir -p ~/.local/bin
-    ln -s /opt/whisper.cpp/build/bin/whisper-server ~/.local/bin/whisper-server
-
----
-
-## Download a model
-
-whisper.cpp ships a download helper. The `small` model is a good balance
-of speed and accuracy (~500 MB):
-
-    cd ~/whisper.cpp          # or wherever you cloned it
-    bash models/download-ggml-model.sh small
-
-Or download manually from
-[HuggingFace](https://huggingface.co/ggerganov/whisper.cpp) and place the
-`.bin` file in any of these locations (the extension scans them all):
-
-    ~/.local/share/whisper/models/   ← recommended for user installs
-    ~/whisper.cpp/models/
-    /opt/whisper.cpp/models/
-    /usr/share/whisper.cpp/models/
-    /usr/local/share/whisper/models/
-
-To use the recommended path:
-
-    mkdir -p ~/.local/share/whisper/models
-    cp ~/whisper.cpp/models/ggml-small.bin ~/.local/share/whisper/models/
+```
+~/.local/share/whisper/models/   ← recommended
+~/whisper.cpp/models/
+/opt/whisper.cpp/models/
+/usr/share/whisper.cpp/models/
+/usr/local/share/whisper/models/
+```
 
 ---
 
 ## Install the extension
 
-    bash install.sh
+```bash
+bash install.sh
+```
 
 Then restart GNOME Shell:
 
 - **Wayland**: log out and back in
 - **X11**: Alt+F2 → type `r` → Enter
 
-Enable the extension:
+Enable:
 
-    gnome-extensions enable whisper-clipboard@local
+```bash
+gnome-extensions enable whisper-clipboard@local
+```
 
 ---
 
 ## Usage
 
-Default shortcut: **Shift+Alt+Space**
+| Action | Default shortcut |
+|---|---|
+| Start / stop recording | **Shift+Alt+Space** |
+| Cancel recording | **Shift+Alt+Escape** |
 
-1. Press the shortcut — recording starts, panel icon turns red.
-2. Press it again — recording stops, icon turns orange while transcribing.
-3. Text lands in your clipboard — icon flashes green for 3 seconds.
+1. Press the shortcut — recording starts, the panel icon turns **red** and a
+   timer appears.
+2. Press it again — recording stops, the icon turns **orange** while transcribing.
+3. Text lands in your clipboard — icon flashes **green** for 3 seconds.
 
-If auto-paste is on, the text is also typed into whatever window has focus.
+To cancel mid-recording without transcribing, press **Shift+Alt+Escape**.
+
+### Push-to-talk
+
+Enable it in preferences (`gnome-extensions prefs whisper-clipboard@local`) or
+the panel menu settings. In PTT mode: hold the shortcut to record, release to
+transcribe. Great for quick dictation without needing two presses.
 
 ---
 
 ## Configuration
 
-Click the panel icon to open the menu:
+Open preferences:
+
+```bash
+gnome-extensions prefs whisper-clipboard@local
+```
+
+Or click the panel icon to access the quick-settings menu.
+
+### Preferences (General)
 
 | Setting | Default | Description |
 |---|---|---|
-| Language | Italian | Language passed to whisper |
-| Model | auto-detected | Any `ggml-*.bin` file from the search paths |
+| Toggle shortcut | Shift+Alt+Space | Start / stop recording |
+| Cancel shortcut | Shift+Alt+Escape | Cancel recording without transcribing |
+| Push-to-talk | off | Hold to record, release to transcribe |
+| Language | English | Language sent to whisper-server per request |
+| Auto-detect language | off | Let whisper detect the language automatically |
+| Translate to English | off | Translate output to English regardless of source |
 | Auto-paste | off | Paste via Ctrl+V after transcription |
-| Ctrl+Shift+V mode | off | Use Ctrl+Shift+V (for terminals) |
-| Restart Server | — | Restart the whisper-server process |
+| Use Ctrl+Shift+V | off | Paste with Ctrl+Shift+V (for terminals) |
+| History size | 10 | Number of past transcriptions kept in the History menu |
 
-Changing language or model automatically restarts the server.
+### Preferences (Server)
 
-### Change the keyboard shortcut
+| Setting | Default | Description |
+|---|---|---|
+| Model path | (auto-detected) | Path to a `ggml-*.bin` model file |
+| Extra models directory | — | Additional directory scanned for model files |
+| whisper-server binary | (auto-detected) | Path to `whisper-server` if not in `$PATH` |
+| Server port | 8178 | HTTP port for the local whisper-server |
 
-    dconf write /org/gnome/shell/extensions/whisper-clipboard/whisper-clipboard-toggle \
-      "['<Super><Shift>r']"
+### Quick-settings menu
 
-### Set a custom binary path
+The panel icon opens a menu with:
+- Current status and server state
+- Auto-paste and Ctrl+Shift+V toggles
+- Translate to English toggle
+- Language submenu (Auto-detect, 20 languages, custom code entry)
+- Model submenu (lists all found models)
+- History submenu (recent transcriptions, click to re-copy)
+- Restart Server button
 
-If `whisper-server` is not in your `$PATH` and not in a standard location:
+### Change a shortcut via dconf
 
-    dconf write /org/gnome/shell/extensions/whisper-clipboard/whisper-server-bin \
-      '"/path/to/your/whisper-server"'
+```bash
+# Toggle shortcut
+dconf write /org/gnome/shell/extensions/whisper-clipboard/whisper-clipboard-toggle \
+  "['<Super><Shift>r']"
 
-Leave it empty (default) to let the extension auto-detect.
+# Cancel shortcut
+dconf write /org/gnome/shell/extensions/whisper-clipboard/whisper-cancel-toggle \
+  "['<Super><Shift>Escape']"
+```
 
-### Set a custom models directory
+### Set a custom binary or model directory
 
-    dconf write /org/gnome/shell/extensions/whisper-clipboard/whisper-models-dir \
-      '"/path/to/your/models"'
+```bash
+dconf write /org/gnome/shell/extensions/whisper-clipboard/whisper-server-bin \
+  '"/path/to/your/whisper-server"'
 
-The extension always scans this directory in addition to the standard locations.
+dconf write /org/gnome/shell/extensions/whisper-clipboard/whisper-models-dir \
+  '"/path/to/your/models"'
+```
 
 ---
 
 ## Logs
 
-    journalctl -f -o cat /usr/bin/gnome-shell
+```bash
+journalctl -f -o cat /usr/bin/gnome-shell
+```
 
 ---
 
