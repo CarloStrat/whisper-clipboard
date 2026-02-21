@@ -887,7 +887,7 @@ export default class WhisperClipboardExtension extends Extension {
 
         // Update UI and show notification immediately — before waiting for ffmpeg
         this._state = State.TRANSCRIBING;
-        this._icon.icon_name = 'emblem-synchronizing-symbolic';
+        this._icon.icon_name = 'view-refresh-symbolic';
         this._icon.set_style('color: #ffaa00;');
         this._updateStatusLabel();
         Main.notify('Whisper Clipboard', 'Transcribing…');
