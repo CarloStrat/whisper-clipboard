@@ -961,12 +961,20 @@ export default class WhisperClipboardExtension extends Extension {
                 const clipboard = St.Clipboard.get_default();
                 clipboard.set_text(St.ClipboardType.CLIPBOARD, text);
 
-                // Save to history
+                // Save to history — always re-read from GSettings so external
+                // deletions (e.g. from prefs) are not overwritten.
                 const maxHistory = this._settings.get_int('history-size');
-                this._history.push(text);
-                if (this._history.length > maxHistory)
-                    this._history.shift();
-                this._settings.set_strv('history', this._history);
+                const entry = JSON.stringify({
+                    text,
+                    timestamp: Math.floor(Date.now() / 1000),
+                    language: autoDetect ? 'auto' : this._settings.get_string('whisper-language'),
+                    translated: this._settings.get_boolean('translate-to-english'),
+                });
+                const history = this._settings.get_strv('history');
+                history.push(entry);
+                if (history.length > maxHistory)
+                    history.shift();
+                this._settings.set_strv('history', history);
 
                 if (this._settings.get_boolean('auto-paste'))
                     this._pasteFromClipboard();

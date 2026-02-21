@@ -35,6 +35,41 @@ const LANGUAGES = [
     {code: 'ro', label: 'Romanian'},
 ];
 
+/* ── History helpers ── */
+
+function parseHistoryEntry(raw) {
+    try {
+        const obj = JSON.parse(raw);
+        if (obj && typeof obj.text === 'string')
+            return obj;
+    } catch (_) {}
+    return {text: raw, timestamp: 0, language: '', translated: false};
+}
+
+function formatRelativeTime(unixSeconds) {
+    if (!unixSeconds)
+        return '';
+    const diff = Math.floor(Date.now() / 1000) - unixSeconds;
+    if (diff < 60)
+        return 'just now';
+    if (diff < 3600)
+        return `${Math.floor(diff / 60)}m ago`;
+    if (diff < 86400)
+        return `${Math.floor(diff / 3600)}h ago`;
+    if (diff < 7 * 86400)
+        return `${Math.floor(diff / 86400)}d ago`;
+    return new Date(unixSeconds * 1000).toLocaleDateString();
+}
+
+function languageLabel(code) {
+    if (!code)
+        return '';
+    if (code === 'auto')
+        return 'Auto-detected';
+    const found = LANGUAGES.find(l => l.code === code);
+    return found ? found.label : code;
+}
+
 /* ── Model scanner (mirrors extension.js logic, runs in prefs process) ── */
 
 const MODEL_SEARCH_DIRS = [
@@ -513,11 +548,11 @@ export default class WhisperClipboardPreferences extends ExtensionPreferences {
             if (currentHistoryGroup)
                 historyPage.remove(currentHistoryGroup);
 
-            const entries = settings.get_strv('history').slice().reverse(); // most-recent first
+            const rawEntries = settings.get_strv('history').slice().reverse(); // most-recent first
 
             currentHistoryGroup = new Adw.PreferencesGroup();
 
-            if (entries.length === 0) {
+            if (rawEntries.length === 0) {
                 const emptyRow = new Adw.ActionRow({
                     title: 'No transcriptions yet',
                     sensitive: false,
@@ -532,26 +567,77 @@ export default class WhisperClipboardPreferences extends ExtensionPreferences {
                 clearBtn.connect('clicked', () => settings.set_strv('history', []));
                 currentHistoryGroup.set_header_suffix(clearBtn);
 
-                for (const text of entries) {
-                    const preview = text.length > 120
-                        ? `${text.substring(0, 120)}…`
+                rawEntries.forEach((raw, reversedIndex) => {
+                    const entry = parseHistoryEntry(raw);
+                    const {text, timestamp, language, translated} = entry;
+
+                    const preview = text.length > 100
+                        ? `${text.substring(0, 100)}…`
                         : text;
-                    const row = new Adw.ActionRow({
+
+                    const expander = new Adw.ExpanderRow({
                         title: GLib.markup_escape_text(preview, -1),
-                        activatable: true,
+                        subtitle: formatRelativeTime(timestamp),
                     });
-                    row.add_suffix(new Gtk.Image({
+
+                    // Copy button
+                    const copyBtn = new Gtk.Button({
                         icon_name: 'edit-copy-symbolic',
+                        tooltip_text: 'Copy to clipboard',
                         valign: Gtk.Align.CENTER,
-                        css_classes: ['dim-label'],
-                    }));
-                    row.connect('activated', () => {
+                        css_classes: ['flat'],
+                    });
+                    copyBtn.connect('clicked', () => {
                         Gdk.Display.get_default().get_clipboard().set_content(
                             Gdk.ContentProvider.new_for_value(text));
                         window.add_toast(new Adw.Toast({title: 'Copied to clipboard'}));
                     });
-                    currentHistoryGroup.add(row);
-                }
+                    expander.add_suffix(copyBtn);
+
+                    // Delete button
+                    const deleteBtn = new Gtk.Button({
+                        icon_name: 'user-trash-symbolic',
+                        tooltip_text: 'Delete entry',
+                        valign: Gtk.Align.CENTER,
+                        css_classes: ['flat'],
+                    });
+                    deleteBtn.connect('clicked', () => {
+                        // reversedIndex 0 = last element in original array
+                        const all = settings.get_strv('history');
+                        const originalIndex = all.length - 1 - reversedIndex;
+                        all.splice(originalIndex, 1);
+                        settings.set_strv('history', all);
+                    });
+                    expander.add_suffix(deleteBtn);
+
+                    // Full text row
+                    const fullTextRow = new Adw.ActionRow({
+                        subtitle: GLib.markup_escape_text(text, -1),
+                        subtitle_lines: 0,
+                    });
+                    expander.add_row(fullTextRow);
+
+                    // Metadata row
+                    const metaParts = [];
+                    const lang = languageLabel(language);
+                    if (lang)
+                        metaParts.push(lang);
+                    if (translated)
+                        metaParts.push('Translated to English');
+                    if (timestamp) {
+                        metaParts.push(new Date(timestamp * 1000).toLocaleString());
+                    }
+                    if (metaParts.length > 0) {
+                        const metaRow = new Adw.ActionRow({
+                            subtitle: GLib.markup_escape_text(metaParts.join(' · '), -1),
+                            subtitle_lines: 0,
+                            css_classes: ['caption'],
+                        });
+                        expander.add_row(metaRow);
+                    }
+
+                    currentHistoryGroup.add(expander);
+                });
             }
 
             historyPage.add(currentHistoryGroup);
