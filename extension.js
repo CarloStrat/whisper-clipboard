@@ -806,7 +806,7 @@ export default class WhisperClipboardExtension extends Extension {
             this._stopAndTranscribe();
             break;
         case State.TRANSCRIBING:
-            Main.notify('Whisper Clipboard', 'Transcription in progress, please wait…');
+            // Intentionally no notification here to keep UI quiet
             break;
         }
     }
@@ -845,7 +845,6 @@ export default class WhisperClipboardExtension extends Extension {
             this._startTimer();
             this._startWaveformOverlay();
 
-            Main.notify('Whisper Clipboard', 'Recording started…');
         } catch (e) {
             Main.notify('Whisper Clipboard', `Failed to start recording: ${e.message}`);
             this._resetIndicator();
@@ -861,8 +860,6 @@ export default class WhisperClipboardExtension extends Extension {
         this._resetIndicator();
 
         try { GLib.unlink(this._wavPath); } catch (_) {}
-
-        Main.notify('Whisper Clipboard', 'Recording cancelled.');
     }
 
     /* ────────────────────────────────────────────────────────── */
@@ -908,12 +905,11 @@ export default class WhisperClipboardExtension extends Extension {
         this._stopTimer();
         this._switchWaveformToTranscribing();
 
-        // Update UI and show notification immediately — before waiting for ffmpeg
+        // Switch to TRANSCRIBING state but keep the default microphone icon appearance
         this._state = State.TRANSCRIBING;
-        this._icon.icon_name = 'view-refresh-symbolic';
-        this._icon.set_style('color: #ffaa00;');
+        this._icon.icon_name = 'audio-input-microphone-symbolic';
+        this._icon.set_style('');
         this._updateStatusLabel();
-        Main.notify('Whisper Clipboard', 'Transcribing…');
 
         const proc = this._recordSubprocess;
         this._recordSubprocess = null;
@@ -1013,12 +1009,10 @@ export default class WhisperClipboardExtension extends Extension {
                 if (this._history.length > maxHistory)
                     this._history.shift();
 
-                Main.notify('Whisper Clipboard',
-                    `Copied to clipboard:\n"${text.substring(0, 120)}${text.length > 120 ? '…' : ''}"`);
-
                 if (this._settings.get_boolean('auto-paste'))
                     this._pasteFromClipboard();
 
+                // Flash success color briefly
                 this._icon.icon_name = 'object-select-symbolic';
                 this._icon.set_style('color: #44ff44;');
                 this._stopWaveformOverlay();
@@ -1244,7 +1238,7 @@ export default class WhisperClipboardExtension extends Extension {
         cr.arc(width - r, height - r, r, 0,             0.5 * Math.PI);
         cr.arc(r,         height - r, r, 0.5 * Math.PI, Math.PI);
         cr.closePath();
-        cr.setSourceRGBA(0.1, 0.1, 0.1, 0.92);
+        cr.setSourceRGBA(0.02, 0.02, 0.02, 0.95);
         cr.fill();
 
         const barW     = 2;
@@ -1268,14 +1262,14 @@ export default class WhisperClipboardExtension extends Extension {
                 const envelope = Math.sin(normI * Math.PI);
                 
                 // Create exactly 3 peaks across the entire width (normI * 3 * PI).
-                // Subtracting a portion of _vizPhase smoothly shifts the peaks left-to-right.
-                const spatial = Math.pow(Math.sin((normI * 3 * Math.PI) - (this._vizPhase * 0.6)), 2);
+                // Subtracting a faster portion of _vizPhase smoothly shifts the peaks left-to-right rapidly.
+                const spatial = Math.pow(Math.sin((normI * 3 * Math.PI) - (this._vizPhase * 1.0)), 2);
                 
                 // Subtle breathing effect on the overall height so it feels organic
                 const temporal = 0.8 + 0.2 * Math.sin(this._vizPhase * 0.5);
                 
-                // Combine into final height
-                const wave = spatial * temporal * envelope;
+                // Combine into final height, capped at 0.8 amplitude
+                const wave = 0.8 * spatial * temporal * envelope;
                 const halfH = Math.max(1, Math.round(wave * maxHalfH));
 
                 cr.setSourceRGBA(0.9, 0.9, 0.95, 0.9);
@@ -1288,7 +1282,7 @@ export default class WhisperClipboardExtension extends Extension {
 
             const NOISE_FLOOR = 0.02;
             const gated = Math.max(0, this._currentRms - NOISE_FLOOR);
-            const globalAmp = Math.min(1, Math.sqrt(gated / (1 - NOISE_FLOOR)));
+            const globalAmp = Math.min(1, 1.5 * Math.sqrt(gated / (1 - NOISE_FLOOR)));
 
             for (let i = 0; i < nBars; i++) {
                 const x = startX + i * step;
