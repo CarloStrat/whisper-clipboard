@@ -13,7 +13,7 @@ glib-compile-schemas schemas/
 # Copy to extensions directory
 echo "→ Installing to $DEST"
 mkdir -p "$DEST"
-cp -r metadata.json extension.js stylesheet.css schemas "$DEST/"
+cp -r metadata.json extension.js prefs.js stylesheet.css schemas "$DEST/"
 
 echo ""
 echo "Installation complete!"

@@ -1,13 +1,17 @@
 /**
- * Whisper Clipboard - GNOME 49 Extension
+ * Whisper Clipboard - GNOME Shell Extension
  *
- * Press Shift+Alt+Space to toggle recording.
- *   - First press  -> starts ffmpeg recording
- *   - Second press -> stops ffmpeg, sends audio to whisper-server, copies text to clipboard
+ * Press the shortcut (default: Shift+Alt+Space) to toggle recording.
+ *   - First press  → starts ffmpeg recording
+ *   - Second press → stops ffmpeg, sends audio to whisper-server, copies text to clipboard
  *
- * Uses whisper-server as a persistent backend to avoid model reload overhead.
- * A panel indicator shows the current state with symbolic icons.
- * Click the indicator to access language, model, and feature settings.
+ * Additional features:
+ *   - Auto-detect language (per-request, no server restart)
+ *   - Translate to English
+ *   - Cancel recording (Shift+Alt+Escape)
+ *   - Recording timer in panel
+ *   - Transcription history
+ *   - Push-to-talk mode (hold to record, release to transcribe)
  */
 
 import GLib from 'gi://GLib';
@@ -31,13 +35,28 @@ const STATE_LABELS = {
     [State.TRANSCRIBING]: 'Transcribing…',
 };
 
+// ~20 most common languages for Whisper
 const LANGUAGES = [
-    {code: 'it', label: 'Italiano'},
     {code: 'en', label: 'English'},
+    {code: 'zh', label: 'Chinese'},
+    {code: 'de', label: 'Deutsch'},
     {code: 'es', label: 'Español'},
     {code: 'fr', label: 'Français'},
-    {code: 'de', label: 'Deutsch'},
+    {code: 'it', label: 'Italiano'},
+    {code: 'ja', label: 'Japanese'},
+    {code: 'ko', label: 'Korean'},
     {code: 'pt', label: 'Português'},
+    {code: 'ru', label: 'Russian'},
+    {code: 'nl', label: 'Dutch'},
+    {code: 'pl', label: 'Polish'},
+    {code: 'ar', label: 'Arabic'},
+    {code: 'tr', label: 'Turkish'},
+    {code: 'sv', label: 'Swedish'},
+    {code: 'hi', label: 'Hindi'},
+    {code: 'uk', label: 'Ukrainian'},
+    {code: 'cs', label: 'Czech'},
+    {code: 'fi', label: 'Finnish'},
+    {code: 'ro', label: 'Romanian'},
 ];
 
 const WHISPER_SERVER_CANDIDATES = [
@@ -56,6 +75,13 @@ const MODEL_SEARCH_DIRS = [
     '/usr/local/share/whisper/models',
 ];
 
+// Modifier bits we care about when matching PTT keystrokes
+const RELEVANT_MODS =
+    Clutter.ModifierType.CONTROL_MASK |
+    Clutter.ModifierType.SHIFT_MASK   |
+    Clutter.ModifierType.MOD1_MASK    |
+    Clutter.ModifierType.SUPER_MASK;
+
 export default class WhisperClipboardExtension extends Extension {
 
     enable() {
@@ -64,8 +90,20 @@ export default class WhisperClipboardExtension extends Extension {
         this._serverSubprocess = null;
         this._serverReady = false;
         this._healthCheckId = null;
-        this._wavPath = GLib.build_filenamev([GLib.get_tmp_dir(), 'whisper_clip_recording.wav']);
         this._successTimeoutId = null;
+        this._timerSourceId = null;
+        this._recordingStartTime = 0;
+        this._history = [];
+
+        // Push-to-talk state
+        this._pttPressId = null;
+        this._pttReleaseId = null;
+        this._pttActive = false;
+        this._pttKeyval = null;
+        this._pttMods = null;
+        this._pttChangedId = null;
+
+        this._wavPath = GLib.build_filenamev([GLib.get_tmp_dir(), 'whisper_clip_recording.wav']);
 
         /* ── settings ── */
         this._settings = this._getKeybindingSettings();
@@ -79,32 +117,61 @@ export default class WhisperClipboardExtension extends Extension {
 
         /* ── panel button ── */
         this._indicator = new PanelMenu.Button(0.0, 'WhisperClipboard', false);
+        const box = new St.BoxLayout({vertical: false});
         this._icon = new St.Icon({
             icon_name: 'audio-input-microphone-symbolic',
             style_class: 'system-status-icon',
         });
-        this._indicator.add_child(this._icon);
+        this._timerLabel = new St.Label({
+            text: '',
+            y_align: Clutter.ActorAlign.CENTER,
+            style_class: 'whisper-timer-label',
+            visible: false,
+        });
+        box.add_child(this._icon);
+        box.add_child(this._timerLabel);
+        this._indicator.add_child(box);
         Main.panel.addToStatusArea('whisper-clipboard', this._indicator);
 
         /* ── popup menu ── */
         this._buildMenu();
 
-        /* ── keyboard shortcut ── */
+        /* ── cancel recording keybinding (always registered) ── */
         Main.wm.addKeybinding(
-            'whisper-clipboard-toggle',
+            'whisper-cancel-toggle',
             this._settings,
             Meta.KeyBindingFlags.NONE,
             Shell.ActionMode.NORMAL | Shell.ActionMode.OVERVIEW,
-            () => this._toggle(),
+            () => this._cancelRecording(),
         );
+
+        /* ── toggle keybinding (normal or push-to-talk) ── */
+        this._pttChangedId = this._settings.connect('changed::push-to-talk', () => {
+            this._updateKeybindingMode();
+        });
+        this._initKeybinding();
 
         /* ── start whisper-server ── */
         this._startServer();
     }
 
     disable() {
-        this._killRecording();
-        this._stopServer();
+        /* ── keybinding cleanup ── */
+        if (this._pttChangedId && this._settings) {
+            this._settings.disconnect(this._pttChangedId);
+            this._pttChangedId = null;
+        }
+
+        if (this._settings && this._settings.get_boolean('push-to-talk')) {
+            this._teardownPushToTalk();
+        } else {
+            try { Main.wm.removeKeybinding('whisper-clipboard-toggle'); } catch (_) {}
+        }
+
+        try { Main.wm.removeKeybinding('whisper-cancel-toggle'); } catch (_) {}
+
+        /* ── timers ── */
+        this._stopTimer();
 
         if (this._healthCheckId) {
             GLib.source_remove(this._healthCheckId);
@@ -116,35 +183,159 @@ export default class WhisperClipboardExtension extends Extension {
             this._successTimeoutId = null;
         }
 
-        Main.wm.removeKeybinding('whisper-clipboard-toggle');
+        /* ── subprocesses ── */
+        this._killRecording();
+        this._stopServer();
 
-        if (this._virtualDevice) {
-            this._virtualDevice = null;
-        }
+        /* ── virtual device ── */
+        this._virtualDevice = null;
 
+        /* ── HTTP session ── */
         if (this._session) {
             this._session.abort();
             this._session = null;
         }
 
+        /* ── UI ── */
         if (this._indicator) {
             this._indicator.destroy();
             this._indicator = null;
         }
+        this._icon = null;
+        this._timerLabel = null;
 
+        /* ── settings ── */
         if (this._keybindingSettings) {
             this._keybindingSettings.run_dispose?.();
             this._keybindingSettings = null;
         }
-
         this._settings = null;
+
+        /* ── misc ── */
+        this._history = [];
 
         try {
             GLib.unlink(this._wavPath);
         } catch (_) { /* ignore */ }
     }
 
-    /* ── whisper-server management ── */
+    /* ────────────────────────────────────────────────────────── */
+    /*  Keybinding mode: normal toggle vs push-to-talk            */
+    /* ────────────────────────────────────────────────────────── */
+
+    _initKeybinding() {
+        if (this._settings.get_boolean('push-to-talk'))
+            this._setupPushToTalk();
+        else
+            this._addWmKeybinding();
+    }
+
+    _addWmKeybinding() {
+        Main.wm.addKeybinding(
+            'whisper-clipboard-toggle',
+            this._settings,
+            Meta.KeyBindingFlags.NONE,
+            Shell.ActionMode.NORMAL | Shell.ActionMode.OVERVIEW,
+            () => this._toggle(),
+        );
+    }
+
+    _updateKeybindingMode() {
+        const isPtt = this._settings.get_boolean('push-to-talk');
+        if (isPtt) {
+            try { Main.wm.removeKeybinding('whisper-clipboard-toggle'); } catch (_) {}
+            this._setupPushToTalk();
+        } else {
+            this._teardownPushToTalk();
+            this._addWmKeybinding();
+        }
+    }
+
+    /* ── Push-to-talk ── */
+
+    /**
+     * Parse a GSettings accelerator string (e.g. "<Shift><Alt>space")
+     * into [keyval, modifierMask].
+     */
+    _parseAccelerator(accelStr) {
+        let mods = 0;
+        let str = accelStr;
+
+        while (str.startsWith('<')) {
+            const end = str.indexOf('>');
+            if (end === -1) break;
+            const mod = str.substring(1, end).toLowerCase();
+            str = str.substring(end + 1);
+
+            switch (mod) {
+            case 'super':   mods |= Clutter.ModifierType.SUPER_MASK;   break;
+            case 'ctrl':
+            case 'control': mods |= Clutter.ModifierType.CONTROL_MASK; break;
+            case 'shift':   mods |= Clutter.ModifierType.SHIFT_MASK;   break;
+            case 'alt':
+            case 'mod1':    mods |= Clutter.ModifierType.MOD1_MASK;    break;
+            }
+        }
+
+        const keyval = Clutter.keyval_from_name(str);
+        return [keyval, mods];
+    }
+
+    _setupPushToTalk() {
+        const bindings = this._settings.get_strv('whisper-clipboard-toggle');
+        if (!bindings.length) return;
+
+        const [keyval, mods] = this._parseAccelerator(bindings[0]);
+        if (keyval === Clutter.KEY_VoidSymbol) return;
+
+        this._pttKeyval = keyval;
+        this._pttMods = mods;
+        this._pttActive = false;
+
+        this._pttPressId = global.stage.connect('key-press-event', (_actor, event) => {
+            if (event.get_key_symbol() !== this._pttKeyval)
+                return Clutter.EVENT_PROPAGATE;
+            if ((event.get_state() & RELEVANT_MODS) !== this._pttMods)
+                return Clutter.EVENT_PROPAGATE;
+            if (this._pttActive)        // suppress key-repeat
+                return Clutter.EVENT_STOP;
+
+            this._pttActive = true;
+            if (this._state === State.IDLE)
+                this._startRecording();
+            return Clutter.EVENT_STOP;
+        });
+
+        this._pttReleaseId = global.stage.connect('key-release-event', (_actor, event) => {
+            if (event.get_key_symbol() !== this._pttKeyval)
+                return Clutter.EVENT_PROPAGATE;
+            if (!this._pttActive)
+                return Clutter.EVENT_PROPAGATE;
+
+            this._pttActive = false;
+            if (this._state === State.RECORDING)
+                this._stopAndTranscribe();
+            return Clutter.EVENT_STOP;
+        });
+    }
+
+    _teardownPushToTalk() {
+        if (this._pttPressId) {
+            global.stage.disconnect(this._pttPressId);
+            this._pttPressId = null;
+        }
+        if (this._pttReleaseId) {
+            global.stage.disconnect(this._pttReleaseId);
+            this._pttReleaseId = null;
+        }
+        this._pttActive = false;
+        this._pttKeyval = null;
+        this._pttMods = null;
+    }
+
+    /* ────────────────────────────────────────────────────────── */
+    /*  whisper-server management                                  */
+    /* ────────────────────────────────────────────────────────── */
 
     _getServerPort() {
         return this._settings.get_int('server-port');
@@ -155,17 +346,14 @@ export default class WhisperClipboardExtension extends Extension {
     }
 
     _resolveWhisperBin() {
-        // 1. Explicit user setting
         const fromSetting = this._settings.get_string('whisper-server-bin').trim();
         if (fromSetting && GLib.file_test(fromSetting, GLib.FileTest.IS_EXECUTABLE))
             return fromSetting;
 
-        // 2. System PATH
         const fromPath = GLib.find_program_in_path('whisper-server');
         if (fromPath)
             return fromPath;
 
-        // 3. Known fallback locations
         for (const candidate of WHISPER_SERVER_CANDIDATES) {
             if (GLib.file_test(candidate, GLib.FileTest.IS_EXECUTABLE))
                 return candidate;
@@ -190,7 +378,6 @@ export default class WhisperClipboardExtension extends Extension {
 
         let whisperModel = this._settings.get_string('whisper-model');
 
-        // Fall back to first scanned model if the configured path doesn't exist
         if (!whisperModel || !GLib.file_test(whisperModel, GLib.FileTest.EXISTS)) {
             const models = this._scanModels();
             if (models.length > 0) {
@@ -274,22 +461,21 @@ export default class WhisperClipboardExtension extends Extension {
         this._session.send_and_read_async(msg, GLib.PRIORITY_DEFAULT, null, (session, res) => {
             try {
                 session.send_and_read_finish(res);
-                const status = msg.get_status();
-                if (status === Soup.Status.OK) {
+                if (msg.get_status() === Soup.Status.OK) {
                     this._serverReady = true;
                     this._updateServerStatusLabel();
                     return;
                 }
             } catch (_) { /* server not ready yet */ }
 
-            // Check if subprocess is still alive
-            if (this._serverSubprocess) {
+            if (this._serverSubprocess)
                 this._pollHealth();
-            }
         });
     }
 
-    /* ── menu ── */
+    /* ────────────────────────────────────────────────────────── */
+    /*  Panel menu                                                 */
+    /* ────────────────────────────────────────────────────────── */
 
     _buildMenu() {
         const menu = this._indicator.menu;
@@ -333,6 +519,16 @@ export default class WhisperClipboardExtension extends Extension {
         });
         menu.addMenuItem(this._ctrlShiftVItem);
 
+        // Translate to English toggle
+        this._translateItem = new PopupMenu.PopupSwitchMenuItem(
+            'Translate to English',
+            this._settings.get_boolean('translate-to-english'),
+        );
+        this._translateItem.connect('toggled', (_item, state) => {
+            this._settings.set_boolean('translate-to-english', state);
+        });
+        menu.addMenuItem(this._translateItem);
+
         menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
 
         // Language submenu
@@ -340,15 +536,29 @@ export default class WhisperClipboardExtension extends Extension {
         menu.addMenuItem(this._langSubmenu);
         this._populateLanguageMenu();
 
+        // Rebuild language list each time the submenu opens
+        this._langSubmenu.menu.connect('open-state-changed', (_, open) => {
+            if (open)
+                this._populateLanguageMenu();
+        });
+
         // Model submenu
         this._modelSubmenu = new PopupMenu.PopupSubMenuMenuItem('Model');
         menu.addMenuItem(this._modelSubmenu);
         this._populateModelMenu();
 
-        // Rebuild model list each time the submenu opens
         this._modelSubmenu.menu.connect('open-state-changed', (_, open) => {
             if (open)
                 this._populateModelMenu();
+        });
+
+        // History submenu
+        this._historySubmenu = new PopupMenu.PopupSubMenuMenuItem('History');
+        menu.addMenuItem(this._historySubmenu);
+
+        this._historySubmenu.menu.connect('open-state-changed', (_, open) => {
+            if (open)
+                this._populateHistoryMenu();
         });
 
         menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
@@ -375,22 +585,65 @@ export default class WhisperClipboardExtension extends Extension {
 
     _populateLanguageMenu() {
         this._langSubmenu.menu.removeAll();
+
+        const autoDetect = this._settings.get_boolean('auto-detect-language');
         const currentLang = this._settings.get_string('whisper-language');
 
+        // Auto-detect item (at top)
+        const autoItem = new PopupMenu.PopupMenuItem('Auto-detect');
+        autoItem.setOrnament(autoDetect
+            ? PopupMenu.Ornament.CHECK
+            : PopupMenu.Ornament.NONE);
+        autoItem.connect('activate', () => {
+            this._settings.set_boolean('auto-detect-language', true);
+            this._populateLanguageMenu();
+            // No server restart needed — language is per-request
+        });
+        this._langSubmenu.menu.addMenuItem(autoItem);
+
+        this._langSubmenu.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
+
+        // Known languages
+        const knownCodes = new Set(LANGUAGES.map(l => l.code));
         for (const {code, label} of LANGUAGES) {
             const item = new PopupMenu.PopupMenuItem(label);
-            if (code === currentLang)
-                item.setOrnament(PopupMenu.Ornament.CHECK);
-            else
-                item.setOrnament(PopupMenu.Ornament.NONE);
+            item.setOrnament(!autoDetect && code === currentLang
+                ? PopupMenu.Ornament.CHECK
+                : PopupMenu.Ornament.NONE);
 
             item.connect('activate', () => {
+                this._settings.set_boolean('auto-detect-language', false);
                 this._settings.set_string('whisper-language', code);
                 this._populateLanguageMenu();
                 this._restartServer();
             });
             this._langSubmenu.menu.addMenuItem(item);
         }
+
+        this._langSubmenu.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
+
+        // Custom language code entry
+        const customItem = new PopupMenu.PopupBaseMenuItem({activate: false});
+        const customEntry = new St.Entry({
+            hint_text: 'Custom code…',
+            style_class: 'whisper-custom-lang-entry',
+            can_focus: true,
+            x_expand: true,
+        });
+        // Pre-fill if current language is non-standard
+        if (!autoDetect && !knownCodes.has(currentLang) && currentLang)
+            customEntry.set_text(currentLang);
+
+        customEntry.get_clutter_text().connect('activate', () => {
+            const code = customEntry.get_text().trim();
+            if (!code) return;
+            this._settings.set_boolean('auto-detect-language', false);
+            this._settings.set_string('whisper-language', code);
+            this._populateLanguageMenu();
+            this._restartServer();
+        });
+        customItem.add_child(customEntry);
+        this._langSubmenu.menu.addMenuItem(customItem);
     }
 
     _populateModelMenu() {
@@ -407,10 +660,9 @@ export default class WhisperClipboardExtension extends Extension {
         for (const modelPath of models) {
             const basename = GLib.path_get_basename(modelPath);
             const item = new PopupMenu.PopupMenuItem(basename);
-            if (modelPath === currentModel)
-                item.setOrnament(PopupMenu.Ornament.CHECK);
-            else
-                item.setOrnament(PopupMenu.Ornament.NONE);
+            item.setOrnament(modelPath === currentModel
+                ? PopupMenu.Ornament.CHECK
+                : PopupMenu.Ornament.NONE);
 
             item.connect('activate', () => {
                 this._settings.set_string('whisper-model', modelPath);
@@ -421,11 +673,46 @@ export default class WhisperClipboardExtension extends Extension {
         }
     }
 
+    _populateHistoryMenu() {
+        this._historySubmenu.menu.removeAll();
+
+        if (this._history.length === 0) {
+            const empty = new PopupMenu.PopupMenuItem('No history yet', {reactive: false});
+            this._historySubmenu.menu.addMenuItem(empty);
+            return;
+        }
+
+        // Show most-recent first
+        for (const {text, timestamp} of [...this._history].reverse()) {
+            const preview = text.length > 60
+                ? `${text.substring(0, 60)}…`
+                : text;
+            const item = new PopupMenu.PopupMenuItem(preview);
+            item.connect('activate', () => {
+                const clipboard = St.Clipboard.get_default();
+                clipboard.set_text(St.ClipboardType.CLIPBOARD, text);
+            });
+            this._historySubmenu.menu.addMenuItem(item);
+        }
+
+        this._historySubmenu.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
+
+        const clearItem = new PopupMenu.PopupMenuItem('Clear History');
+        clearItem.connect('activate', () => {
+            this._history = [];
+            this._populateHistoryMenu();
+        });
+        this._historySubmenu.menu.addMenuItem(clearItem);
+    }
+
+    /* ────────────────────────────────────────────────────────── */
+    /*  Model scanner                                              */
+    /* ────────────────────────────────────────────────────────── */
+
     _scanModels() {
         const seen = new Set();
         const models = [];
 
-        // Build search list: custom setting first, then standard locations
         const customDir = this._settings.get_string('whisper-models-dir').trim();
         const searchDirs = [
             ...(customDir ? [customDir] : []),
@@ -459,7 +746,9 @@ export default class WhisperClipboardExtension extends Extension {
         return models;
     }
 
-    /* ── keybinding helper ── */
+    /* ────────────────────────────────────────────────────────── */
+    /*  Settings helper                                            */
+    /* ────────────────────────────────────────────────────────── */
 
     _getKeybindingSettings() {
         if (!this._keybindingSettings) {
@@ -482,7 +771,9 @@ export default class WhisperClipboardExtension extends Extension {
         return this._keybindingSettings;
     }
 
-    /* ── toggle logic ── */
+    /* ────────────────────────────────────────────────────────── */
+    /*  Toggle logic                                               */
+    /* ────────────────────────────────────────────────────────── */
 
     _toggle() {
         switch (this._state) {
@@ -498,7 +789,9 @@ export default class WhisperClipboardExtension extends Extension {
         }
     }
 
-    /* ── recording ── */
+    /* ────────────────────────────────────────────────────────── */
+    /*  Recording                                                  */
+    /* ────────────────────────────────────────────────────────── */
 
     _startRecording() {
         if (!this._serverReady) {
@@ -506,7 +799,6 @@ export default class WhisperClipboardExtension extends Extension {
             return;
         }
 
-        // Remove old file
         try { GLib.unlink(this._wavPath); } catch (_) { /* ok */ }
 
         try {
@@ -522,6 +814,10 @@ export default class WhisperClipboardExtension extends Extension {
             this._icon.remove_style_class_name('whisper-icon-success');
             this._icon.add_style_class_name('whisper-icon-recording');
             this._updateStatusLabel();
+
+            // Start the recording timer
+            this._startTimer();
+
             Main.notify('Whisper Clipboard', 'Recording started…');
         } catch (e) {
             Main.notify('Whisper Clipboard', `Failed to start recording: ${e.message}`);
@@ -530,10 +826,62 @@ export default class WhisperClipboardExtension extends Extension {
         }
     }
 
-    /* ── stop + transcribe via whisper-server ── */
+    _cancelRecording() {
+        if (this._state !== State.RECORDING)
+            return;
+
+        this._killRecording();
+        this._stopTimer();
+        this._resetIndicator();
+
+        try { GLib.unlink(this._wavPath); } catch (_) {}
+
+        Main.notify('Whisper Clipboard', 'Recording cancelled.');
+    }
+
+    /* ────────────────────────────────────────────────────────── */
+    /*  Recording timer                                            */
+    /* ────────────────────────────────────────────────────────── */
+
+    _startTimer() {
+        this._recordingStartTime = GLib.get_monotonic_time();
+
+        if (this._timerLabel) {
+            this._timerLabel.set_text('0:00');
+            this._timerLabel.show();
+        }
+
+        this._timerSourceId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, 1, () => {
+            const elapsed = Math.floor(
+                (GLib.get_monotonic_time() - this._recordingStartTime) / 1_000_000,
+            );
+            const minutes = Math.floor(elapsed / 60);
+            const seconds = elapsed % 60;
+            if (this._timerLabel)
+                this._timerLabel.set_text(`${minutes}:${seconds.toString().padStart(2, '0')}`);
+            return GLib.SOURCE_CONTINUE;
+        });
+    }
+
+    _stopTimer() {
+        if (this._timerSourceId) {
+            GLib.source_remove(this._timerSourceId);
+            this._timerSourceId = null;
+        }
+        if (this._timerLabel) {
+            this._timerLabel.hide();
+            this._timerLabel.set_text('');
+        }
+    }
+
+    /* ────────────────────────────────────────────────────────── */
+    /*  Stop + transcribe via whisper-server                       */
+    /* ────────────────────────────────────────────────────────── */
 
     _stopAndTranscribe() {
         this._killRecording();
+        this._stopTimer();
+
         this._state = State.TRANSCRIBING;
         this._icon.icon_name = 'emblem-synchronizing-symbolic';
         this._icon.remove_style_class_name('whisper-icon-recording');
@@ -542,7 +890,6 @@ export default class WhisperClipboardExtension extends Extension {
         this._updateStatusLabel();
         Main.notify('Whisper Clipboard', 'Transcribing…');
 
-        // Read the WAV file
         const file = Gio.File.new_for_path(this._wavPath);
         file.load_contents_async(null, (source, res) => {
             try {
@@ -562,12 +909,21 @@ export default class WhisperClipboardExtension extends Extension {
 
     _sendToServer(wavContents) {
         const wavBytes = GLib.Bytes.new(wavContents);
-        const whisperLang = this._settings.get_string('whisper-language');
+        const autoDetect = this._settings.get_boolean('auto-detect-language');
+        const translate  = this._settings.get_boolean('translate-to-english');
 
         const multipart = new Soup.Multipart('multipart/form-data');
         multipart.append_form_file('file', 'recording.wav', 'audio/wav', wavBytes);
         multipart.append_form_string('response_format', 'text');
-        multipart.append_form_string('language', whisperLang);
+
+        if (autoDetect)
+            multipart.append_form_string('detect_language', 'true');
+        else
+            multipart.append_form_string('language', this._settings.get_string('whisper-language'));
+
+        if (translate)
+            multipart.append_form_string('translate', 'true');
+
         multipart.append_form_string('temperature', '0.0');
         multipart.append_form_string('temperature_inc', '0.2');
         multipart.append_form_string('no_timestamps', 'true');
@@ -600,10 +956,15 @@ export default class WhisperClipboardExtension extends Extension {
                 const clipboard = St.Clipboard.get_default();
                 clipboard.set_text(St.ClipboardType.CLIPBOARD, text);
 
+                // Save to history
+                const maxHistory = this._settings.get_int('history-size');
+                this._history.push({text, timestamp: new Date().toISOString()});
+                if (this._history.length > maxHistory)
+                    this._history.shift();
+
                 Main.notify('Whisper Clipboard',
                     `Copied to clipboard:\n"${text.substring(0, 120)}${text.length > 120 ? '…' : ''}"`);
 
-                // Auto-paste if enabled
                 if (this._settings.get_boolean('auto-paste'))
                     this._pasteFromClipboard();
 
@@ -612,7 +973,6 @@ export default class WhisperClipboardExtension extends Extension {
                 this._icon.remove_style_class_name('whisper-icon-transcribing');
                 this._icon.add_style_class_name('whisper-icon-success');
 
-                // Reset icon after 3 s
                 this._successTimeoutId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, 3, () => {
                     this._successTimeoutId = null;
                     this._resetIndicator();
@@ -625,7 +985,9 @@ export default class WhisperClipboardExtension extends Extension {
         });
     }
 
-    /* ── auto-paste ── */
+    /* ────────────────────────────────────────────────────────── */
+    /*  Auto-paste                                                 */
+    /* ────────────────────────────────────────────────────────── */
 
     _pasteFromClipboard() {
         if (!this._virtualDevice)
@@ -633,20 +995,16 @@ export default class WhisperClipboardExtension extends Extension {
 
         const useCtrlShiftV = this._settings.get_boolean('paste-use-ctrl-shift-v');
 
-        // Small delay to ensure clipboard is set before pasting
         GLib.timeout_add(GLib.PRIORITY_DEFAULT, 100, () => {
             const t = GLib.get_monotonic_time();
 
-            // Press modifier keys
             this._virtualDevice.notify_keyval(t, Clutter.KEY_Control_L, Clutter.KeyState.PRESSED);
             if (useCtrlShiftV)
                 this._virtualDevice.notify_keyval(t, Clutter.KEY_Shift_L, Clutter.KeyState.PRESSED);
 
-            // Press and release V
             this._virtualDevice.notify_keyval(t + 1000, Clutter.KEY_v, Clutter.KeyState.PRESSED);
             this._virtualDevice.notify_keyval(t + 2000, Clutter.KEY_v, Clutter.KeyState.RELEASED);
 
-            // Release modifier keys
             if (useCtrlShiftV)
                 this._virtualDevice.notify_keyval(t + 3000, Clutter.KEY_Shift_L, Clutter.KeyState.RELEASED);
             this._virtualDevice.notify_keyval(t + 4000, Clutter.KEY_Control_L, Clutter.KeyState.RELEASED);
@@ -655,13 +1013,15 @@ export default class WhisperClipboardExtension extends Extension {
         });
     }
 
-    /* ── helpers ── */
+    /* ────────────────────────────────────────────────────────── */
+    /*  Helpers                                                    */
+    /* ────────────────────────────────────────────────────────── */
 
     _killRecording() {
         if (this._recordSubprocess) {
             try {
-                this._recordSubprocess.send_signal(2); // SIGINT
-                this._recordSubprocess.wait(null);      // wait for clean exit
+                this._recordSubprocess.send_signal(2); // SIGINT → clean WAV header
+                this._recordSubprocess.wait(null);
             } catch (_) { /* process may have already exited */ }
             this._recordSubprocess = null;
         }
@@ -669,6 +1029,7 @@ export default class WhisperClipboardExtension extends Extension {
 
     _resetIndicator() {
         this._state = State.IDLE;
+        this._stopTimer();
         if (this._icon) {
             this._icon.icon_name = 'audio-input-microphone-symbolic';
             this._icon.remove_style_class_name('whisper-icon-recording');

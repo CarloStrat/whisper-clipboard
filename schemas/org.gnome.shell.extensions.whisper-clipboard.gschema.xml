@@ -2,21 +2,59 @@
 <schemalist>
   <schema id="org.gnome.shell.extensions.whisper-clipboard"
           path="/org/gnome/shell/extensions/whisper-clipboard/">
+
+    <!-- ── Keybindings ── -->
     <key name="whisper-clipboard-toggle" type="as">
       <default>['&lt;Shift&gt;&lt;Alt&gt;space']</default>
       <summary>Toggle voice recording</summary>
       <description>Start/stop audio recording for whisper transcription</description>
     </key>
-    <key name="whisper-language" type="s">
-      <default>'it'</default>
-      <summary>Whisper language</summary>
-      <description>Language code passed to whisper-cli (-l flag)</description>
+    <key name="whisper-cancel-toggle" type="as">
+      <default>['&lt;Shift&gt;&lt;Alt&gt;Escape']</default>
+      <summary>Cancel voice recording</summary>
+      <description>Cancel ongoing audio recording without transcribing</description>
     </key>
+
+    <!-- ── Transcription ── -->
+    <key name="whisper-language" type="s">
+      <default>'en'</default>
+      <summary>Whisper language</summary>
+      <description>Language code passed to whisper-server per request (e.g. en, it, fr)</description>
+    </key>
+    <key name="auto-detect-language" type="b">
+      <default>false</default>
+      <summary>Auto-detect language</summary>
+      <description>Let whisper-server auto-detect the spoken language (per-request, no server restart needed)</description>
+    </key>
+    <key name="translate-to-english" type="b">
+      <default>false</default>
+      <summary>Translate to English</summary>
+      <description>Translate the transcribed audio to English</description>
+    </key>
+
+    <!-- ── Model / Server ── -->
     <key name="whisper-model" type="s">
       <default>'/opt/whisper.cpp/models/ggml-small.bin'</default>
       <summary>Whisper model path</summary>
       <description>Path to the whisper.cpp GGML model file</description>
     </key>
+    <key name="whisper-models-dir" type="s">
+      <default>''</default>
+      <summary>Custom whisper models directory</summary>
+      <description>Additional directory to search for GGML model files. Leave empty to use the default search paths.</description>
+    </key>
+    <key name="whisper-server-bin" type="s">
+      <default>''</default>
+      <summary>Path to whisper-server binary</summary>
+      <description>Full path to the whisper-server binary. Leave empty to auto-detect from PATH and common locations.</description>
+    </key>
+    <key name="server-port" type="i">
+      <default>8178</default>
+      <summary>Whisper server port</summary>
+      <description>Port for the whisper-server HTTP backend</description>
+    </key>
+
+    <!-- ── Clipboard / Paste ── -->
     <key name="auto-paste" type="b">
       <default>false</default>
       <summary>Auto-paste after transcription</summary>
@@ -27,20 +65,20 @@
       <summary>Use Ctrl+Shift+V for pasting</summary>
       <description>Use Ctrl+Shift+V instead of Ctrl+V (for terminal apps)</description>
     </key>
-    <key name="server-port" type="i">
-      <default>8178</default>
-      <summary>Whisper server port</summary>
-      <description>Port for the whisper-server HTTP backend</description>
+
+    <!-- ── History ── -->
+    <key name="history-size" type="i">
+      <default>10</default>
+      <summary>Transcription history size</summary>
+      <description>Maximum number of past transcriptions to keep in the History menu (1–50)</description>
     </key>
-    <key name="whisper-server-bin" type="s">
-      <default>''</default>
-      <summary>Path to whisper-server binary</summary>
-      <description>Full path to the whisper-server binary. Leave empty to auto-detect from PATH and common locations.</description>
+
+    <!-- ── Push-to-talk ── -->
+    <key name="push-to-talk" type="b">
+      <default>false</default>
+      <summary>Push-to-talk mode</summary>
+      <description>Hold the shortcut key to record, release to transcribe</description>
     </key>
-    <key name="whisper-models-dir" type="s">
-      <default>''</default>
-      <summary>Custom whisper models directory</summary>
-      <description>Additional directory to search for GGML model files. Leave empty to use the default search paths.</description>
-    </key>
+
   </schema>
 </schemalist>
