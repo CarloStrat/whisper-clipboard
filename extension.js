@@ -129,6 +129,7 @@ export default class WhisperClipboardExtension extends Extension {
 
         /* ── settings ── */
         this._settings = this._getKeybindingSettings();
+        this._history = this._settings.get_strv('history');
 
         /* ── HTTP session ── */
         this._session = new Soup.Session();
@@ -575,15 +576,6 @@ export default class WhisperClipboardExtension extends Extension {
                 this._populateModelMenu();
         });
 
-        // History submenu
-        this._historySubmenu = new PopupMenu.PopupSubMenuMenuItem('History');
-        menu.addMenuItem(this._historySubmenu);
-
-        this._historySubmenu.menu.connect('open-state-changed', (_, open) => {
-            if (open)
-                this._populateHistoryMenu();
-        });
-
         menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
 
         // Restart server button
@@ -592,6 +584,11 @@ export default class WhisperClipboardExtension extends Extension {
             this._restartServer();
         });
         menu.addMenuItem(restartItem);
+
+        // Preferences button
+        const prefsItem = new PopupMenu.PopupMenuItem('Preferences');
+        prefsItem.connect('activate', () => this.openPreferences());
+        menu.addMenuItem(prefsItem);
     }
 
     _updateStatusLabel() {
@@ -694,37 +691,6 @@ export default class WhisperClipboardExtension extends Extension {
         }
     }
 
-    _populateHistoryMenu() {
-        this._historySubmenu.menu.removeAll();
-
-        if (this._history.length === 0) {
-            const empty = new PopupMenu.PopupMenuItem('No history yet', {reactive: false});
-            this._historySubmenu.menu.addMenuItem(empty);
-            return;
-        }
-
-        // Show most-recent first
-        for (const text of [...this._history].reverse()) {
-            const preview = text.length > 60
-                ? `${text.substring(0, 60)}…`
-                : text;
-            const item = new PopupMenu.PopupMenuItem(preview);
-            item.connect('activate', () => {
-                const clipboard = St.Clipboard.get_default();
-                clipboard.set_text(St.ClipboardType.CLIPBOARD, text);
-            });
-            this._historySubmenu.menu.addMenuItem(item);
-        }
-
-        this._historySubmenu.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
-
-        const clearItem = new PopupMenu.PopupMenuItem('Clear History');
-        clearItem.connect('activate', () => {
-            this._history = [];
-            this._populateHistoryMenu();
-        });
-        this._historySubmenu.menu.addMenuItem(clearItem);
-    }
 
     /* ────────────────────────────────────────────────────────── */
     /*  Model scanner                                             */
@@ -1000,6 +966,7 @@ export default class WhisperClipboardExtension extends Extension {
                 this._history.push(text);
                 if (this._history.length > maxHistory)
                     this._history.shift();
+                this._settings.set_strv('history', this._history);
 
                 if (this._settings.get_boolean('auto-paste'))
                     this._pasteFromClipboard();
