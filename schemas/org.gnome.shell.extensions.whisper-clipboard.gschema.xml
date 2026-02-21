@@ -70,7 +70,12 @@
     <key name="history-size" type="i">
       <default>10</default>
       <summary>Transcription history size</summary>
-      <description>Maximum number of past transcriptions to keep in the History menu (1–50)</description>
+      <description>Maximum number of past transcriptions to keep (1–50)</description>
+    </key>
+    <key name="history" type="as">
+      <default>[]</default>
+      <summary>Transcription history</summary>
+      <description>Persisted list of recent transcriptions (oldest first)</description>
     </key>
 
     <!-- ── Push-to-talk ── -->
