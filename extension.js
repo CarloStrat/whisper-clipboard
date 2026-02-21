@@ -40,8 +40,21 @@ const LANGUAGES = [
     {code: 'pt', label: 'Português'},
 ];
 
-const MODELS_DIR = '/opt/whisper.cpp/models';
-const WHISPER_SERVER_BIN = '/opt/whisper.cpp/build/bin/whisper-server';
+const WHISPER_SERVER_CANDIDATES = [
+    `${GLib.get_home_dir()}/.local/bin/whisper-server`,
+    `${GLib.get_home_dir()}/whisper.cpp/build/bin/whisper-server`,
+    '/opt/whisper.cpp/build/bin/whisper-server',
+    '/usr/local/bin/whisper-server',
+    '/usr/bin/whisper-server',
+];
+
+const MODEL_SEARCH_DIRS = [
+    `${GLib.get_home_dir()}/.local/share/whisper/models`,
+    `${GLib.get_home_dir()}/whisper.cpp/models`,
+    '/opt/whisper.cpp/models',
+    '/usr/share/whisper.cpp/models',
+    '/usr/local/share/whisper/models',
+];
 
 export default class WhisperClipboardExtension extends Extension {
 
@@ -67,7 +80,7 @@ export default class WhisperClipboardExtension extends Extension {
         /* ── panel button ── */
         this._indicator = new PanelMenu.Button(0.0, 'WhisperClipboard', false);
         this._icon = new St.Icon({
-            icon_name: 'org.gnome.Settings-accessibility-hearing-symbolic',
+            icon_name: 'audio-input-microphone-symbolic',
             style_class: 'system-status-icon',
         });
         this._indicator.add_child(this._icon);
@@ -141,16 +154,64 @@ export default class WhisperClipboardExtension extends Extension {
         return `http://127.0.0.1:${this._getServerPort()}${path}`;
     }
 
+    _resolveWhisperBin() {
+        // 1. Explicit user setting
+        const fromSetting = this._settings.get_string('whisper-server-bin').trim();
+        if (fromSetting && GLib.file_test(fromSetting, GLib.FileTest.IS_EXECUTABLE))
+            return fromSetting;
+
+        // 2. System PATH
+        const fromPath = GLib.find_program_in_path('whisper-server');
+        if (fromPath)
+            return fromPath;
+
+        // 3. Known fallback locations
+        for (const candidate of WHISPER_SERVER_CANDIDATES) {
+            if (GLib.file_test(candidate, GLib.FileTest.IS_EXECUTABLE))
+                return candidate;
+        }
+
+        return null;
+    }
+
     _startServer() {
         if (this._serverSubprocess)
             return;
 
-        const whisperModel = this._settings.get_string('whisper-model');
+        const whisperBin = this._resolveWhisperBin();
+        if (!whisperBin) {
+            log('[WhisperClipboard] whisper-server not found.');
+            Main.notify('Whisper Clipboard',
+                'whisper-server not found. Install it or set the path via:\n' +
+                'dconf write /org/gnome/shell/extensions/whisper-clipboard/whisper-server-bin ' +
+                '\'"/path/to/whisper-server"\'');
+            return;
+        }
+
+        let whisperModel = this._settings.get_string('whisper-model');
+
+        // Fall back to first scanned model if the configured path doesn't exist
+        if (!whisperModel || !GLib.file_test(whisperModel, GLib.FileTest.EXISTS)) {
+            const models = this._scanModels();
+            if (models.length > 0) {
+                whisperModel = models[0];
+                this._settings.set_string('whisper-model', whisperModel);
+                log(`[WhisperClipboard] Auto-selected model: ${whisperModel}`);
+            }
+        }
+
+        if (!whisperModel) {
+            Main.notify('Whisper Clipboard',
+                'No whisper model found. Download a model and place it in ' +
+                '~/.local/share/whisper/models/ or ~/whisper.cpp/models/');
+            return;
+        }
+
         const whisperLang = this._settings.get_string('whisper-language');
         const port = this._getServerPort().toString();
 
         const cmd = [
-            WHISPER_SERVER_BIN,
+            whisperBin,
             '-m', whisperModel,
             '-l', whisperLang,
             '--host', '127.0.0.1',
@@ -166,6 +227,7 @@ export default class WhisperClipboardExtension extends Extension {
             this._pollHealth();
         } catch (e) {
             log(`[WhisperClipboard] Failed to start whisper-server: ${e.message}`);
+            Main.notify('Whisper Clipboard', `Failed to start whisper-server: ${e.message}`);
         }
     }
 
@@ -360,22 +422,38 @@ export default class WhisperClipboardExtension extends Extension {
     }
 
     _scanModels() {
+        const seen = new Set();
         const models = [];
-        try {
-            const dir = Gio.File.new_for_path(MODELS_DIR);
-            const enumerator = dir.enumerate_children(
-                'standard::name,standard::type',
-                Gio.FileQueryInfoFlags.NONE,
-                null,
-            );
-            let info;
-            while ((info = enumerator.next_file(null)) !== null) {
-                const name = info.get_name();
-                if (name.startsWith('ggml-') && name.endsWith('.bin'))
-                    models.push(GLib.build_filenamev([MODELS_DIR, name]));
-            }
-            enumerator.close(null);
-        } catch (_) { /* directory may not exist */ }
+
+        // Build search list: custom setting first, then standard locations
+        const customDir = this._settings.get_string('whisper-models-dir').trim();
+        const searchDirs = [
+            ...(customDir ? [customDir] : []),
+            ...MODEL_SEARCH_DIRS,
+        ];
+
+        for (const dirPath of searchDirs) {
+            try {
+                const dir = Gio.File.new_for_path(dirPath);
+                const enumerator = dir.enumerate_children(
+                    'standard::name,standard::type',
+                    Gio.FileQueryInfoFlags.NONE,
+                    null,
+                );
+                let info;
+                while ((info = enumerator.next_file(null)) !== null) {
+                    const name = info.get_name();
+                    if (name.startsWith('ggml-') && name.endsWith('.bin')) {
+                        const fullPath = GLib.build_filenamev([dirPath, name]);
+                        if (!seen.has(fullPath)) {
+                            seen.add(fullPath);
+                            models.push(fullPath);
+                        }
+                    }
+                }
+                enumerator.close(null);
+            } catch (_) { /* directory may not exist */ }
+        }
 
         models.sort();
         return models;
@@ -457,7 +535,7 @@ export default class WhisperClipboardExtension extends Extension {
     _stopAndTranscribe() {
         this._killRecording();
         this._state = State.TRANSCRIBING;
-        this._icon.icon_name = 'screen-reader-symbolic';
+        this._icon.icon_name = 'emblem-synchronizing-symbolic';
         this._icon.remove_style_class_name('whisper-icon-recording');
         this._icon.remove_style_class_name('whisper-icon-success');
         this._icon.add_style_class_name('whisper-icon-transcribing');
@@ -592,7 +670,7 @@ export default class WhisperClipboardExtension extends Extension {
     _resetIndicator() {
         this._state = State.IDLE;
         if (this._icon) {
-            this._icon.icon_name = 'org.gnome.Settings-accessibility-hearing-symbolic';
+            this._icon.icon_name = 'audio-input-microphone-symbolic';
             this._icon.remove_style_class_name('whisper-icon-recording');
             this._icon.remove_style_class_name('whisper-icon-transcribing');
             this._icon.remove_style_class_name('whisper-icon-success');

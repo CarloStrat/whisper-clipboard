@@ -32,5 +32,15 @@
       <summary>Whisper server port</summary>
       <description>Port for the whisper-server HTTP backend</description>
     </key>
+    <key name="whisper-server-bin" type="s">
+      <default>''</default>
+      <summary>Path to whisper-server binary</summary>
+      <description>Full path to the whisper-server binary. Leave empty to auto-detect from PATH and common locations.</description>
+    </key>
+    <key name="whisper-models-dir" type="s">
+      <default>''</default>
+      <summary>Custom whisper models directory</summary>
+      <description>Additional directory to search for GGML model files. Leave empty to use the default search paths.</description>
+    </key>
   </schema>
 </schemalist>
