@@ -794,6 +794,12 @@ export default class WhisperClipboardExtension extends Extension {
     /* ────────────────────────────────────────────────────────── */
 
     _startRecording() {
+        // Cancel any lingering success indicator from a previous transcription
+        if (this._successTimeoutId) {
+            GLib.source_remove(this._successTimeoutId);
+            this._successTimeoutId = null;
+        }
+
         if (!this._serverReady) {
             Main.notify('Whisper Clipboard', 'Server is still starting, please wait…');
             return;
@@ -879,9 +885,9 @@ export default class WhisperClipboardExtension extends Extension {
     /* ────────────────────────────────────────────────────────── */
 
     _stopAndTranscribe() {
-        this._killRecording();
         this._stopTimer();
 
+        // Update UI and show notification immediately — before waiting for ffmpeg
         this._state = State.TRANSCRIBING;
         this._icon.icon_name = 'emblem-synchronizing-symbolic';
         this._icon.remove_style_class_name('whisper-icon-recording');
@@ -890,6 +896,26 @@ export default class WhisperClipboardExtension extends Extension {
         this._updateStatusLabel();
         Main.notify('Whisper Clipboard', 'Transcribing…');
 
+        const proc = this._recordSubprocess;
+        this._recordSubprocess = null;
+
+        if (!proc) {
+            this._readAndTranscribe();
+            return;
+        }
+
+        // Send SIGINT so ffmpeg writes a valid WAV header before exiting,
+        // then wait asynchronously so we don't block the main thread
+        try { proc.send_signal(2); } catch (_) {}
+
+        proc.wait_async(null, (_proc, res) => {
+            try { _proc.wait_finish(res); } catch (_) {}
+            if (this._state === State.TRANSCRIBING)
+                this._readAndTranscribe();
+        });
+    }
+
+    _readAndTranscribe() {
         const file = Gio.File.new_for_path(this._wavPath);
         file.load_contents_async(null, (source, res) => {
             try {
@@ -917,7 +943,7 @@ export default class WhisperClipboardExtension extends Extension {
         multipart.append_form_string('response_format', 'text');
 
         if (autoDetect)
-            multipart.append_form_string('detect_language', 'true');
+            multipart.append_form_string('language', 'auto');
         else
             multipart.append_form_string('language', this._settings.get_string('whisper-language'));
 
@@ -1019,10 +1045,8 @@ export default class WhisperClipboardExtension extends Extension {
 
     _killRecording() {
         if (this._recordSubprocess) {
-            try {
-                this._recordSubprocess.send_signal(2); // SIGINT → clean WAV header
-                this._recordSubprocess.wait(null);
-            } catch (_) { /* process may have already exited */ }
+            try { this._recordSubprocess.send_signal(2); } catch (_) {}
+            try { this._recordSubprocess.force_exit(); } catch (_) {}
             this._recordSubprocess = null;
         }
     }
