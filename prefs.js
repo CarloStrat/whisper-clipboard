@@ -9,7 +9,7 @@ import Gtk from 'gi://Gtk';
 import Gdk from 'gi://Gdk';
 import Gio from 'gi://Gio';
 import GObject from 'gi://GObject';
-import {ExtensionPreferences} from 'resource:///org/gnome/shell/extensions/prefs.js';
+import {ExtensionPreferences} from 'resource:///org/gnome/Shell/Extensions/js/extensions/prefs.js';
 
 const LANGUAGES = [
     {code: 'en', label: 'English'},
