@@ -129,6 +129,49 @@ Push-to-talk replaces `Main.wm.addKeybinding` with raw key events on
 against Clutter events. Switching between PTT and normal mode is live
 (no restart needed), driven by the `changed::push-to-talk` signal.
 
+## Waveform overlay
+
+During recording a 350×64 px overlay appears just below the panel, showing
+real-time audio levels as symmetric amplitude bars (2 px wide, 1 px gap).
+
+A **second ffmpeg process** is spawned purely for visualization:
+
+    ffmpeg -nostdin -f alsa -i default -ar 16000 -ac 1 -f s16le pipe:1
+
+It writes raw signed-16-bit PCM to stdout. The extension reads it in 3 200-byte
+chunks (~100 ms each) via `read_bytes_async`. The first 10 chunks (~1 s) are
+discarded as warmup to avoid the initial ALSA buffer noise showing up as
+saturated bars.
+
+### RMS + noise gate
+
+Each chunk is RMS-averaged over its samples, giving a value in [0, 1].
+A noise floor of 0.02 is subtracted before scaling, so background room
+noise renders as flat (minimum 1 px) bars while speech shows proportionally:
+
+    gated = max(0, rms - 0.02)
+    amp   = sqrt(gated / 0.98)   // sqrt curve for perceptual linearity
+
+### Transcribing animation
+
+When the user stops recording, the audio-capture ffmpeg is killed but the
+overlay stays visible. `_switchWaveformToTranscribing()` sets `_vizMode =
+'transcribing'`. The repaint timer keeps firing and `_drawWaveform()` switches
+to a **sin² traveling wave** (white, same bar density):
+
+    wave = sin²(i × 0.13 + phase) × sin(i/nBars × π)   // sin envelope tapers edges
+
+`phase` increments by 0.05 per frame (~60 fps), giving a full cycle roughly
+every 2 seconds. The overlay is removed as soon as transcription completes
+(success or error).
+
+### Repaint loop
+
+A `GLib.timeout_add(16, …)` (~60 fps) calls `queue_repaint()` on the
+`St.DrawingArea`. Cairo is used for the background rounded-rect and the bars.
+The draw function is completely stateless except for `_vizAmplitudes` and
+`_vizPhase` — no retained Cairo surfaces.
+
 ## Recording timer
 
 The panel indicator is an `St.BoxLayout` containing an `St.Icon` and an
@@ -210,12 +253,12 @@ Everything in GSettings under `org.gnome.shell.extensions.whisper-clipboard`:
 `St.BoxLayout` → `St.Icon` + `St.Label` (timer), inside a
 `PanelMenu.Button`. The icon name and CSS class change to reflect state:
 
-| State | Icon | CSS class |
+| State | Icon | Inline style |
 |---|---|---|
 | Idle | `audio-input-microphone-symbolic` | — |
-| Recording | `media-record-symbolic` | `whisper-icon-recording` (red) |
-| Transcribing | `emblem-synchronizing-symbolic` | `whisper-icon-transcribing` (orange) |
-| Success | `object-select-symbolic` | `whisper-icon-success` (green) |
+| Recording | `media-record-symbolic` | `color: #ff4444` (red) |
+| Transcribing | `view-refresh-symbolic` | `color: #ffaa00` (orange) |
+| Success | `object-select-symbolic` | `color: #44ff44` (green) |
 
 The success state lasts 3 seconds, then resets to idle. If a new
 recording is started while the success indicator is still showing,

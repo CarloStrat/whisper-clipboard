@@ -115,9 +115,10 @@ gnome-extensions enable whisper-clipboard@local
 | Start / stop recording | **Shift+Alt+Space** |
 | Cancel recording | **Shift+Alt+Escape** |
 
-1. Press the shortcut — recording starts, the panel icon turns **red** and a
-   timer appears.
-2. Press it again — recording stops, the icon turns **orange** while transcribing.
+1. Press the shortcut — recording starts, the panel icon turns **red**, a timer
+   appears, and a real-time waveform overlay shows your audio levels below the panel.
+2. Press it again — recording stops, the waveform switches to a smooth animated
+   wave while the audio is being transcribed.
 3. Text lands in your clipboard — icon flashes **green** for 3 seconds.
 
 To cancel mid-recording without transcribing, press **Shift+Alt+Escape**.

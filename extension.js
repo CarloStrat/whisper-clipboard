@@ -88,7 +88,7 @@ const RELEVANT_MODS =
 
 // Waveform overlay dimensions
 const WAVEFORM_BARS = 140;  // number of amplitude bars
-const WAVEFORM_W    = 450;  // overlay width in px
+const WAVEFORM_W    = 350;  // overlay width in px
 const WAVEFORM_H    = 64;   // overlay height in px
 
 export default class WhisperClipboardExtension extends Extension {
@@ -111,6 +111,8 @@ export default class WhisperClipboardExtension extends Extension {
         this._vizAmplitudes = [];
         this._vizDrawId = null;
         this._vizWarmupChunks = 0;
+        this._vizMode = 'recording'; // 'recording' | 'transcribing'
+        this._vizPhase = 0;
         this._waveformOverlay = null;
         this._waveformArea = null;
 
@@ -903,7 +905,7 @@ export default class WhisperClipboardExtension extends Extension {
 
     _stopAndTranscribe() {
         this._stopTimer();
-        this._stopWaveformOverlay();
+        this._switchWaveformToTranscribing();
 
         // Update UI and show notification immediately — before waiting for ffmpeg
         this._state = State.TRANSCRIBING;
@@ -1012,6 +1014,7 @@ export default class WhisperClipboardExtension extends Extension {
 
                 this._icon.icon_name = 'object-select-symbolic';
                 this._icon.set_style('color: #44ff44;');
+                this._stopWaveformOverlay();
 
                 this._successTimeoutId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, 3, () => {
                     this._successTimeoutId = null;
@@ -1076,10 +1079,12 @@ export default class WhisperClipboardExtension extends Extension {
         }
 
         this._vizAmplitudes = new Array(WAVEFORM_BARS).fill(0);
-        this._vizWarmupChunks = 3; // discard first ~300 ms of ffmpeg startup noise
+        this._vizWarmupChunks = 10; // discard first ~1 s of ffmpeg startup noise
+        this._vizMode = 'recording';
+        this._vizPhase = 0;
 
-        // Container (waveform + buttons stacked vertically)
-        this._waveformOverlay = new St.BoxLayout({vertical: true, reactive: true});
+        // Container
+        this._waveformOverlay = new St.BoxLayout({vertical: true, reactive: false});
 
         // Drawing area
         this._waveformArea = new St.DrawingArea({
@@ -1094,46 +1099,14 @@ export default class WhisperClipboardExtension extends Extension {
         });
         this._waveformOverlay.add_child(this._waveformArea);
 
-        // Button row
-        const btnRow = new St.BoxLayout({
-            vertical: false,
-            reactive: true,
-            x_expand: true,
-            style: 'padding: 4px 6px 6px 6px;',
-        });
-
-        const stopBtn = new St.Button({
-            label: 'Stop',
-            reactive: true,
-            can_focus: false,
-            x_expand: true,
-            style: 'background-color: rgba(200,60,60,0.9); color: white; ' +
-                   'border-radius: 6px; padding: 5px 0; margin-right: 4px; font-size: 12px;',
-        });
-        stopBtn.connect('clicked', () => this._cancelRecording());
-
-        const transcribeBtn = new St.Button({
-            label: 'Transcribe',
-            reactive: true,
-            can_focus: false,
-            x_expand: true,
-            style: 'background-color: rgba(50,110,220,0.9); color: white; ' +
-                   'border-radius: 6px; padding: 5px 0; font-size: 12px;',
-        });
-        transcribeBtn.connect('clicked', () => this._stopAndTranscribe());
-
-        btnRow.add_child(stopBtn);
-        btnRow.add_child(transcribeBtn);
-        this._waveformOverlay.add_child(btnRow);
-
         Main.uiGroup.add_child(this._waveformOverlay);
         this._positionWaveformOverlay();
 
         if (this._vizInputStream)
             this._readVizChunk();
 
-        // ~20 fps repaint timer
-        this._vizDrawId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 50, () => {
+        // ~60 fps repaint timer
+        this._vizDrawId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 16, () => {
             if (this._waveformArea)
                 this._waveformArea.queue_repaint();
             return GLib.SOURCE_CONTINUE;
@@ -1173,6 +1146,33 @@ export default class WhisperClipboardExtension extends Extension {
         }
         this._waveformArea = null;
         this._vizAmplitudes = [];
+        this._vizMode = 'recording';
+        this._vizPhase = 0;
+    }
+
+    // Stop audio capture but keep the overlay visible with an animated wave.
+    // Called when transitioning from RECORDING → TRANSCRIBING.
+    _switchWaveformToTranscribing() {
+        if (!this._waveformOverlay)
+            return;
+
+        // Stop the audio capture subprocess
+        if (this._vizCancellable) {
+            this._vizCancellable.cancel();
+            this._vizCancellable = null;
+        }
+        if (this._vizProc) {
+            try { this._vizProc.force_exit(); } catch (_) {}
+            this._vizProc = null;
+        }
+        this._vizInputStream = null;
+
+        // Clear recorded amplitudes and switch to animated mode
+        this._vizAmplitudes = [];
+        this._vizPhase = 0;
+        this._vizMode = 'transcribing';
+        // The repaint timer (_vizDrawId) keeps running — the draw function
+        // will render the animation instead of the real waveform.
     }
 
     _readVizChunk() {
@@ -1234,23 +1234,43 @@ export default class WhisperClipboardExtension extends Extension {
         cr.setSourceRGBA(0.1, 0.1, 0.1, 0.92);
         cr.fill();
 
-        // Amplitude bars — symmetric above and below center (Super Whisper style)
-        const barW    = 2;
-        const gap     = 1;
-        const step    = barW + gap;
+        // Amplitude bars — symmetric above and below center
+        const barW     = 2;
+        const gap      = 1;
+        const step     = barW + gap;
         const maxHalfH = Math.floor(height / 2) - 4;
         const centerY  = height / 2;
         const nBars    = Math.min(WAVEFORM_BARS, Math.floor((width - 8) / step));
         const startX   = Math.floor((width - nBars * step + gap) / 2);
 
-        cr.setSourceRGBA(0.9, 0.9, 0.95, 0.9);
-        const amps = this._vizAmplitudes;
-        for (let i = 0; i < nBars; i++) {
-            const amp   = Math.min(1, Math.sqrt(amps[i] || 0));
-            const halfH = Math.max(1, Math.round(amp * maxHalfH));
-            const x     = startX + i * step;
-            cr.rectangle(x, centerY - halfH, barW, halfH * 2);
-            cr.fill();
+        if (this._vizMode === 'transcribing') {
+            // Slow traveling sine² wave — white, same 2px/1px bar density as recording
+            this._vizPhase += 0.05;
+            cr.setSourceRGBA(0.9, 0.9, 0.95, 0.9);
+            for (let i = 0; i < nBars; i++) {
+                // sin² gives smooth bell-shaped humps; envelope tapers the edges
+                const s        = Math.sin(i * 0.13 + this._vizPhase);
+                const envelope = Math.sin((i / (nBars - 1)) * Math.PI);
+                const wave     = s * s * envelope;
+                const halfH    = Math.max(1, Math.round(wave * maxHalfH));
+                const x        = startX + i * step;
+                cr.rectangle(x, centerY - halfH, barW, halfH * 2);
+                cr.fill();
+            }
+        } else {
+            // Real amplitude bars with noise gate
+            const NOISE_FLOOR = 0.02;
+            cr.setSourceRGBA(0.9, 0.9, 0.95, 0.9);
+            const amps = this._vizAmplitudes;
+            for (let i = 0; i < nBars; i++) {
+                const raw   = amps[i] || 0;
+                const gated = Math.max(0, raw - NOISE_FLOOR);
+                const amp   = Math.min(1, Math.sqrt(gated / (1 - NOISE_FLOOR)));
+                const halfH = Math.max(1, Math.round(amp * maxHalfH));
+                const x     = startX + i * step;
+                cr.rectangle(x, centerY - halfH, barW, halfH * 2);
+                cr.fill();
+            }
         }
     }
 
@@ -1269,6 +1289,7 @@ export default class WhisperClipboardExtension extends Extension {
     _resetIndicator() {
         this._state = State.IDLE;
         this._stopTimer();
+        this._stopWaveformOverlay();
         if (this._icon) {
             this._icon.icon_name = 'audio-input-microphone-symbolic';
             this._icon.set_style('');
