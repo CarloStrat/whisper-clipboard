@@ -73,7 +73,7 @@ class ShortcutRow extends Adw.ActionRow {
     _refresh() {
         const accels = this._settings.get_strv(this._key);
         this._accelLabel.set_accelerator(
-            accels.length > 0 && accels[0] ? accels[0] : '',
+            accels[0] ?? '',
         );
     }
 
@@ -225,7 +225,7 @@ export default class WhisperClipboardPreferences extends ExtensionPreferences {
 
         langRow.connect('notify::selected', () => {
             const idx = langRow.get_selected();
-            if (idx >= 0 && idx < langCodes.length)
+            if (idx >= 0)
                 settings.set_string('whisper-language', langCodes[idx]);
         });
         settings.connect('changed::whisper-language', syncLangCombo);
@@ -323,6 +323,10 @@ export default class WhisperClipboardPreferences extends ExtensionPreferences {
         modelsDirRow.connect('apply', () => {
             settings.set_string('whisper-models-dir', modelsDirRow.get_text());
         });
+        settings.connect('changed::whisper-models-dir', () => {
+            if (modelsDirRow.get_text() !== settings.get_string('whisper-models-dir'))
+                modelsDirRow.set_text(settings.get_string('whisper-models-dir'));
+        });
         serverGroup.add(modelsDirRow);
 
         // whisper-server binary override
@@ -333,6 +337,10 @@ export default class WhisperClipboardPreferences extends ExtensionPreferences {
         });
         binRow.connect('apply', () => {
             settings.set_string('whisper-server-bin', binRow.get_text());
+        });
+        settings.connect('changed::whisper-server-bin', () => {
+            if (binRow.get_text() !== settings.get_string('whisper-server-bin'))
+                binRow.set_text(settings.get_string('whisper-server-bin'));
         });
         serverGroup.add(binRow);
 

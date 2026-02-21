@@ -648,7 +648,6 @@ export default class WhisperClipboardExtension extends Extension {
         const customItem = new PopupMenu.PopupBaseMenuItem({activate: false});
         const customEntry = new St.Entry({
             hint_text: 'Custom code…',
-            style_class: 'whisper-custom-lang-entry',
             can_focus: true,
             x_expand: true,
         });
@@ -951,7 +950,6 @@ export default class WhisperClipboardExtension extends Extension {
     _sendToServer(wavContents) {
         const wavBytes = GLib.Bytes.new(wavContents);
         const autoDetect = this._settings.get_boolean('auto-detect-language');
-        const translate  = this._settings.get_boolean('translate-to-english');
 
         const multipart = new Soup.Multipart('multipart/form-data');
         multipart.append_form_file('file', 'recording.wav', 'audio/wav', wavBytes);
@@ -962,7 +960,7 @@ export default class WhisperClipboardExtension extends Extension {
         else
             multipart.append_form_string('language', this._settings.get_string('whisper-language'));
 
-        if (translate)
+        if (this._settings.get_boolean('translate-to-english'))
             multipart.append_form_string('translate', 'true');
 
         multipart.append_form_string('temperature', '0.0');
@@ -976,22 +974,16 @@ export default class WhisperClipboardExtension extends Extension {
                 const bytes = session.send_and_read_finish(res);
                 const status = msg.get_status();
 
-                // Fix: GJS GLib.Bytes.get_data() can return a [Uint8Array, size] tuple
-                let data = bytes.get_data();
-                if (Array.isArray(data)) {
-                    data = data[0];
-                }
+                const data = this._unpackBytes(bytes);
 
                 if (status !== Soup.Status.OK) {
-                    const decoder = new TextDecoder('utf-8');
-                    const body = decoder.decode(data);
+                    const body = new TextDecoder('utf-8').decode(data);
                     Main.notify('Whisper Clipboard', `Server error (${status}): ${body.substring(0, 120)}`);
                     this._resetIndicator();
                     return;
                 }
 
-                const decoder = new TextDecoder('utf-8');
-                const text = decoder.decode(data).trim();
+                const text = new TextDecoder('utf-8').decode(data).trim();
 
                 if (text.length === 0) {
                     Main.notify('Whisper Clipboard', 'No text recognized.');
@@ -1147,10 +1139,6 @@ export default class WhisperClipboardExtension extends Extension {
             this._waveformOverlay = null;
         }
         this._waveformArea = null;
-        this._targetRms = 0;
-        this._currentRms = 0;
-        this._vizMode = 'recording';
-        this._vizPhase = 0;
     }
 
     // Stop audio capture but keep the overlay visible with an animated wave.
@@ -1193,14 +1181,8 @@ export default class WhisperClipboardExtension extends Extension {
                     if (this._vizWarmupChunks > 0) {
                         this._vizWarmupChunks--;
                     } else {
-                        // Fix: GJS get_data() may return [Uint8Array, size] tuple
-                        let u8 = bytes.get_data();
-                        if (Array.isArray(u8)) {
-                            u8 = u8[0];
-                        }
-
                         // Capture target RMS; the 60fps draw loop will interpolate smoothly towards it.
-                        this._targetRms = this._computeRms(u8);
+                        this._targetRms = this._computeRms(this._unpackBytes(bytes));
                     }
 
                     this._readVizChunk();
@@ -1222,6 +1204,14 @@ export default class WhisperClipboardExtension extends Extension {
             sum += s * s;
         }
         return Math.sqrt(sum / n) / 32768;
+    }
+
+    // GJS GLib.Bytes.get_data() can return a [Uint8Array, size] tuple
+    _unpackBytes(bytes) {
+        let data = bytes.get_data();
+        if (Array.isArray(data))
+            data = data[0];
+        return data;
     }
 
     _drawWaveform(cr, width, height) {
@@ -1249,14 +1239,16 @@ export default class WhisperClipboardExtension extends Extension {
         const nBars    = Math.min(WAVEFORM_BARS, Math.floor((width - 8) / step));
         const startX   = Math.floor((width - nBars * step + gap) / 2);
 
-        this._vizPhase = (this._vizPhase || 0) + 0.05;
+        this._vizPhase += 0.05;
+
+        const denom = Math.max(1, nBars - 1);
 
         if (this._vizMode === 'transcribing') {
             for (let i = 0; i < nBars; i++) {
                 const x = startX + i * step;
-                
+
                 // Normalized coordinate across the container [0.0 to 1.0]
-                const normI = i / (nBars - 1);
+                const normI = i / denom;
                 
                 // Static envelope keeps the left/right edges forced to height 0
                 const envelope = Math.sin(normI * Math.PI);
@@ -1278,7 +1270,7 @@ export default class WhisperClipboardExtension extends Extension {
             }
         } else {
             // Smoothly interpolate current RMS towards the latest target RMS from ffmpeg
-            this._currentRms = (this._currentRms || 0) + ((this._targetRms || 0) - (this._currentRms || 0)) * 0.2;
+            this._currentRms += (this._targetRms - this._currentRms) * 0.2;
 
             const NOISE_FLOOR = 0.02;
             const gated = Math.max(0, this._currentRms - NOISE_FLOOR);
@@ -1287,7 +1279,7 @@ export default class WhisperClipboardExtension extends Extension {
             for (let i = 0; i < nBars; i++) {
                 const x = startX + i * step;
                 // Envelope makes bars in the center tallest, tapering out at edges
-                const envelope = Math.sin((i / (nBars - 1)) * Math.PI);
+                const envelope = Math.sin((i / denom) * Math.PI);
                 
                 // Add this._vizPhase to the spatial components so the waveform wiggles horizontally.
                 // It creates overlapping ripples that travel continuously right and left inside the fixed envelope.
