@@ -4,5 +4,6 @@
   "uuid": "whisper-clipboard@local",
   "shell-version": ["49"],
   "version": 1,
-  "url": ""
+  "url": "",
+  "settings-schema": "org.gnome.shell.extensions.whisper-clipboard"
 }
