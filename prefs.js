@@ -11,29 +11,7 @@ import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 import GObject from 'gi://GObject';
 import {ExtensionPreferences} from 'resource:///org/gnome/Shell/Extensions/js/extensions/prefs.js';
-
-const LANGUAGES = [
-    {code: 'en', label: 'English'},
-    {code: 'zh', label: 'Chinese'},
-    {code: 'de', label: 'Deutsch'},
-    {code: 'es', label: 'Español'},
-    {code: 'fr', label: 'Français'},
-    {code: 'it', label: 'Italiano'},
-    {code: 'ja', label: 'Japanese'},
-    {code: 'ko', label: 'Korean'},
-    {code: 'pt', label: 'Português'},
-    {code: 'ru', label: 'Russian'},
-    {code: 'nl', label: 'Dutch'},
-    {code: 'pl', label: 'Polish'},
-    {code: 'ar', label: 'Arabic'},
-    {code: 'tr', label: 'Turkish'},
-    {code: 'sv', label: 'Swedish'},
-    {code: 'hi', label: 'Hindi'},
-    {code: 'uk', label: 'Ukrainian'},
-    {code: 'cs', label: 'Czech'},
-    {code: 'fi', label: 'Finnish'},
-    {code: 'ro', label: 'Romanian'},
-];
+import {LANGUAGES, scanModels} from './constants.js';
 
 /* ── History helpers ── */
 
@@ -68,45 +46,6 @@ function languageLabel(code) {
         return 'Auto-detected';
     const found = LANGUAGES.find(l => l.code === code);
     return found ? found.label : code;
-}
-
-/* ── Model scanner (mirrors extension.js logic, runs in prefs process) ── */
-
-const MODEL_SEARCH_DIRS = [
-    `${GLib.get_home_dir()}/.local/share/whisper/models`,
-    `${GLib.get_home_dir()}/whisper.cpp/models`,
-    '/opt/whisper.cpp/models',
-    '/usr/share/whisper.cpp/models',
-    '/usr/local/share/whisper/models',
-];
-
-function scanModels(settings) {
-    const seen = new Set();
-    const models = [];
-    const customDir = settings.get_string('whisper-models-dir').trim();
-    const searchDirs = [...(customDir ? [customDir] : []), ...MODEL_SEARCH_DIRS];
-    for (const dirPath of searchDirs) {
-        try {
-            const dir = Gio.File.new_for_path(dirPath);
-            const enumerator = dir.enumerate_children(
-                'standard::name,standard::type', Gio.FileQueryInfoFlags.NONE, null,
-            );
-            let info;
-            while ((info = enumerator.next_file(null)) !== null) {
-                const name = info.get_name();
-                if (name.startsWith('ggml-') && name.endsWith('.bin')) {
-                    const fullPath = GLib.build_filenamev([dirPath, name]);
-                    if (!seen.has(fullPath)) {
-                        seen.add(fullPath);
-                        models.push(fullPath);
-                    }
-                }
-            }
-            enumerator.close(null);
-        } catch (_) { /* dir may not exist */ }
-    }
-    models.sort();
-    return models;
 }
 
 /* ── Shortcut capture row ── */
@@ -376,7 +315,29 @@ export default class WhisperClipboardPreferences extends ExtensionPreferences {
 
         // ── Model selection ──
         const discoveredModels = scanModels(settings);
-        let modelComboRow = null;
+
+        // Gtk.StringList backing the combo — updated in-place when dir changes.
+        const modelNamesList = new Gtk.StringList();
+        discoveredModels.forEach(p => modelNamesList.append(GLib.path_get_basename(p)));
+
+        const modelComboRow = new Adw.ComboRow({
+            title: 'Select model',
+            subtitle: 'Models discovered in standard locations',
+            model: modelNamesList,
+            visible: discoveredModels.length > 0,
+        });
+
+        const initComboIdx = discoveredModels.indexOf(settings.get_string('whisper-model'));
+        if (initComboIdx >= 0)
+            modelComboRow.set_selected(initComboIdx);
+
+        modelComboRow.connect('notify::selected', () => {
+            const i = modelComboRow.get_selected();
+            if (i >= 0 && i < discoveredModels.length)
+                settings.set_string('whisper-model', discoveredModels[i]);
+        });
+
+        serverGroup.add(modelComboRow);
 
         // Model path text entry (with file picker)
         const modelRow = new Adw.EntryRow({
@@ -395,7 +356,8 @@ export default class WhisperClipboardPreferences extends ExtensionPreferences {
             const dialog = new Gtk.FileDialog({title: 'Select Model File', modal: true});
             const filter = new Gtk.FileFilter();
             filter.add_pattern('*.bin');
-            filter.set_name('Whisper models (*.bin)');
+            filter.add_pattern('*.gguf');
+            filter.set_name('Whisper models (*.bin, *.gguf)');
             dialog.set_default_filter(filter);
             const current = settings.get_string('whisper-model');
             if (current)
@@ -415,36 +377,10 @@ export default class WhisperClipboardPreferences extends ExtensionPreferences {
             const path = settings.get_string('whisper-model');
             if (modelRow.get_text() !== path)
                 modelRow.set_text(path);
-            if (modelComboRow) {
-                const idx = discoveredModels.indexOf(path);
-                if (idx >= 0 && modelComboRow.get_selected() !== idx)
-                    modelComboRow.set_selected(idx);
-            }
+            const idx = discoveredModels.indexOf(path);
+            if (idx >= 0 && modelComboRow.get_selected() !== idx)
+                modelComboRow.set_selected(idx);
         });
-
-        // Discovered models combo (quick picker shown above the text entry)
-        if (discoveredModels.length > 0) {
-            const namesList = new Gtk.StringList();
-            discoveredModels.forEach(p => namesList.append(GLib.path_get_basename(p)));
-
-            modelComboRow = new Adw.ComboRow({
-                title: 'Select model',
-                subtitle: 'Models discovered in standard locations',
-                model: namesList,
-            });
-
-            const initIdx = discoveredModels.indexOf(settings.get_string('whisper-model'));
-            if (initIdx >= 0)
-                modelComboRow.set_selected(initIdx);
-
-            modelComboRow.connect('notify::selected', () => {
-                const i = modelComboRow.get_selected();
-                if (i >= 0 && i < discoveredModels.length)
-                    settings.set_string('whisper-model', discoveredModels[i]);
-            });
-
-            serverGroup.add(modelComboRow);
-        }
 
         serverGroup.add(modelRow);
 
@@ -479,6 +415,18 @@ export default class WhisperClipboardPreferences extends ExtensionPreferences {
         settings.connect('changed::whisper-models-dir', () => {
             if (modelsDirRow.get_text() !== settings.get_string('whisper-models-dir'))
                 modelsDirRow.set_text(settings.get_string('whisper-models-dir'));
+
+            // Rescan and rebuild combo
+            const newModels = scanModels(settings);
+            discoveredModels.length = 0;
+            newModels.forEach(m => discoveredModels.push(m));
+            modelNamesList.splice(0, modelNamesList.get_n_items(),
+                newModels.map(p => GLib.path_get_basename(p)));
+            modelComboRow.set_visible(newModels.length > 0);
+            if (newModels.length > 0) {
+                const idx = newModels.indexOf(settings.get_string('whisper-model'));
+                if (idx >= 0) modelComboRow.set_selected(idx);
+            }
         });
         serverGroup.add(modelsDirRow);
 

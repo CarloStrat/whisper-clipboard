@@ -34,7 +34,7 @@
 
     <!-- ── Model / Server ── -->
     <key name="whisper-model" type="s">
-      <default>'/opt/whisper.cpp/models/ggml-small.bin'</default>
+      <default>''</default>
       <summary>Whisper model path</summary>
       <description>Path to the whisper.cpp GGML model file</description>
     </key>
@@ -74,6 +74,7 @@
     <!-- ── History ── -->
     <key name="history-size" type="i">
       <default>10</default>
+      <range min="1" max="50"/>
       <summary>Transcription history size</summary>
       <description>Maximum number of past transcriptions to keep (1–50)</description>
     </key>

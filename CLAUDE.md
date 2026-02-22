@@ -43,7 +43,8 @@ journalctl -f -o cat /usr/bin/gnome-shell
 | File | Purpose |
 |------|---------|
 | `extension.js` | Entire extension — `WhisperClipboardExtension` class with state machine, recording, transcription, waveform overlay, panel indicator, menus |
-| `prefs.js` | Adw-based preferences window (General + Server pages) with custom `ShortcutRow` GObject |
+| `prefs.js` | Adw-based preferences window (General + Server + History pages) with custom `ShortcutRow` GObject |
+| `constants.js` | Shared constants (`LANGUAGES`, `MODEL_SEARCH_DIRS`) and `scanModels()` — imported by both `extension.js` and `prefs.js` |
 | `stylesheet.css` | Timer label styling (`.whisper-timer-label`) |
 | `schemas/org.gnome.shell.extensions.whisper-clipboard.gschema.xml` | GSettings schema (all keys) |
 | `metadata.json` | Extension metadata including `settings-schema` for GNOME 49 |
@@ -80,7 +81,7 @@ State transitions are driven by `_toggle()`, which dispatches to `_startRecordin
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `whisper-clipboard-toggle` | `as` | `<Shift><Alt>space` | Toggle shortcut |
-| `whisper-cancel-toggle` | `as` | `<Shift><Alt>Escape` | Cancel shortcut |
+| `whisper-cancel-toggle` | `as` | `<Shift><Alt>Delete` | Cancel shortcut |
 | `whisper-language` | `s` | `en` | Language code |
 | `auto-detect-language` | `b` | `false` | Send `language=auto` |
 | `translate-to-english` | `b` | `false` | Add `translate=true` to request |

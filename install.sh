@@ -1,10 +1,19 @@
 #!/bin/bash
 set -e
 
+# Ensure we run relative to the script's directory regardless of where it is invoked from
+cd "$(dirname "$0")"
+
 UUID="whisper-clipboard@local"
 DEST="$HOME/.local/share/gnome-shell/extensions/$UUID"
 
 echo "═══ Whisper Clipboard – Installation ═══"
+
+# Check for required tool
+if ! command -v glib-compile-schemas &>/dev/null; then
+    echo "Error: glib-compile-schemas not found. Install glib2-devel (Fedora) or libglib2.0-dev (Debian/Ubuntu)." >&2
+    exit 1
+fi
 
 # Compile schemas
 echo "→ Compiling schemas…"
@@ -13,7 +22,7 @@ glib-compile-schemas schemas/
 # Copy to extensions directory
 echo "→ Installing to $DEST"
 mkdir -p "$DEST"
-cp -r metadata.json extension.js prefs.js stylesheet.css schemas "$DEST/"
+cp -r metadata.json extension.js prefs.js constants.js stylesheet.css schemas "$DEST/"
 
 echo ""
 echo "Installation complete!"
@@ -26,5 +35,5 @@ echo "  2. Enable the extension:"
 echo "     gnome-extensions enable $UUID"
 echo "  3. Shortcut: Shift+Alt+Space"
 echo ""
-echo "To change the shortcut:"
-echo "  dconf write /org/gnome/shell/extensions/whisper-clipboard/whisper-clipboard-toggle \"['<Shift><Alt>space']\""
+echo "To change preferences:"
+echo "  gnome-extensions prefs $UUID"

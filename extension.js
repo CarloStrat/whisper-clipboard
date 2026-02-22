@@ -27,6 +27,7 @@ import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import * as PanelMenu from 'resource:///org/gnome/shell/ui/panelMenu.js';
 import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
 import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
+import {LANGUAGES, KNOWN_LANG_CODES, scanModels} from './constants.js';
 
 const State = {IDLE: 0, RECORDING: 1, TRANSCRIBING: 2};
 
@@ -36,47 +37,12 @@ const STATE_LABELS = {
     [State.TRANSCRIBING]: 'Transcribing…',
 };
 
-// ~20 most common languages for Whisper
-const LANGUAGES = [
-    {code: 'en', label: 'English'},
-    {code: 'zh', label: 'Chinese'},
-    {code: 'de', label: 'Deutsch'},
-    {code: 'es', label: 'Español'},
-    {code: 'fr', label: 'Français'},
-    {code: 'it', label: 'Italiano'},
-    {code: 'ja', label: 'Japanese'},
-    {code: 'ko', label: 'Korean'},
-    {code: 'pt', label: 'Português'},
-    {code: 'ru', label: 'Russian'},
-    {code: 'nl', label: 'Dutch'},
-    {code: 'pl', label: 'Polish'},
-    {code: 'ar', label: 'Arabic'},
-    {code: 'tr', label: 'Turkish'},
-    {code: 'sv', label: 'Swedish'},
-    {code: 'hi', label: 'Hindi'},
-    {code: 'uk', label: 'Ukrainian'},
-    {code: 'cs', label: 'Czech'},
-    {code: 'fi', label: 'Finnish'},
-    {code: 'ro', label: 'Romanian'},
-];
-
-// Pre-built set for O(1) lookups in _populateLanguageMenu
-const KNOWN_LANG_CODES = new Set(LANGUAGES.map(l => l.code));
-
 const WHISPER_SERVER_CANDIDATES = [
     `${GLib.get_home_dir()}/.local/bin/whisper-server`,
     `${GLib.get_home_dir()}/whisper.cpp/build/bin/whisper-server`,
     '/opt/whisper.cpp/build/bin/whisper-server',
     '/usr/local/bin/whisper-server',
     '/usr/bin/whisper-server',
-];
-
-const MODEL_SEARCH_DIRS = [
-    `${GLib.get_home_dir()}/.local/share/whisper/models`,
-    `${GLib.get_home_dir()}/whisper.cpp/models`,
-    '/opt/whisper.cpp/models',
-    '/usr/share/whisper.cpp/models',
-    '/usr/local/share/whisper/models',
 ];
 
 // Modifier bits we care about when matching PTT keystrokes
@@ -95,14 +61,15 @@ export default class WhisperClipboardExtension extends Extension {
 
     enable() {
         this._state = State.IDLE;
+        this._locked = false;
         this._recordSubprocess = null;
         this._serverSubprocess = null;
         this._serverReady = false;
         this._healthCheckId = null;
         this._successTimeoutId = null;
+        this._pasteTimeoutId = null;
         this._timerSourceId = null;
         this._recordingStartTime = 0;
-        this._history = [];
 
         // Waveform overlay state
         this._vizProc = null;
@@ -129,7 +96,6 @@ export default class WhisperClipboardExtension extends Extension {
 
         /* ── settings ── */
         this._settings = this._getKeybindingSettings();
-        this._history = this._settings.get_strv('history');
 
         /* ── HTTP session ── */
         this._session = new Soup.Session();
@@ -216,6 +182,11 @@ export default class WhisperClipboardExtension extends Extension {
             this._successTimeoutId = null;
         }
 
+        if (this._pasteTimeoutId) {
+            GLib.source_remove(this._pasteTimeoutId);
+            this._pasteTimeoutId = null;
+        }
+
         /* ── subprocesses ── */
         this._stopWaveformOverlay();
         this._killRecording();
@@ -245,8 +216,7 @@ export default class WhisperClipboardExtension extends Extension {
         }
         this._settings = null;
 
-        /* ── misc ── */
-        this._history = [];
+        this._locked = false;
 
         try {
             GLib.unlink(this._wavPath);
@@ -378,7 +348,7 @@ export default class WhisperClipboardExtension extends Extension {
 
     _isLocalHost() {
         const h = this._getServerHost();
-        return h === '127.0.0.1' || h === 'localhost';
+        return h === '127.0.0.1' || h === 'localhost' || h === '::1' || h.startsWith('127.');
     }
 
     _getServerPort() {
@@ -419,7 +389,7 @@ export default class WhisperClipboardExtension extends Extension {
 
         const whisperBin = this._resolveWhisperBin();
         if (!whisperBin) {
-            log('[WhisperClipboard] whisper-server not found.');
+            console.warn('[WhisperClipboard] whisper-server not found.');
             Main.notify('Whisper Clipboard',
                 'whisper-server not found. Install it or set the path via:\n' +
                 'dconf write /org/gnome/shell/extensions/whisper-clipboard/whisper-server-bin ' +
@@ -434,7 +404,7 @@ export default class WhisperClipboardExtension extends Extension {
             if (models.length > 0) {
                 whisperModel = models[0];
                 this._settings.set_string('whisper-model', whisperModel);
-                log(`[WhisperClipboard] Auto-selected model: ${whisperModel}`);
+                console.log(`[WhisperClipboard] Auto-selected model: ${whisperModel}`);
             }
         }
 
@@ -464,20 +434,23 @@ export default class WhisperClipboardExtension extends Extension {
             this._serverReady = false;
             this._pollHealth();
         } catch (e) {
-            log(`[WhisperClipboard] Failed to start whisper-server: ${e.message}`);
+            console.warn(`[WhisperClipboard] Failed to start whisper-server: ${e.message}`);
             Main.notify('Whisper Clipboard', `Failed to start whisper-server: ${e.message}`);
         }
     }
 
     _stopServer() {
         if (this._serverSubprocess) {
-            try {
-                this._serverSubprocess.force_exit();
-                this._serverSubprocess.wait(null);
-            } catch (_) { /* already exited */ }
+            const proc = this._serverSubprocess;
             this._serverSubprocess = null;
             this._serverReady = false;
             this._updateServerStatusLabel();
+            try {
+                proc.force_exit();
+                proc.wait_async(null, (_proc, res) => {
+                    try { _proc.wait_finish(res); } catch (_) {}
+                });
+            } catch (_) { /* already exited */ }
         }
     }
 
@@ -519,7 +492,7 @@ export default class WhisperClipboardExtension extends Extension {
                 }
             } catch (_) { /* server not ready yet */ }
 
-            if (this._serverSubprocess)
+            if (this._serverSubprocess || !this._isLocalHost())
                 this._pollHealth();
         });
     }
@@ -724,40 +697,7 @@ export default class WhisperClipboardExtension extends Extension {
     /* ────────────────────────────────────────────────────────── */
 
     _scanModels() {
-        const seen = new Set();
-        const models = [];
-
-        const customDir = this._settings.get_string('whisper-models-dir').trim();
-        const searchDirs = [
-            ...(customDir ? [customDir] : []),
-            ...MODEL_SEARCH_DIRS,
-        ];
-
-        for (const dirPath of searchDirs) {
-            try {
-                const dir = Gio.File.new_for_path(dirPath);
-                const enumerator = dir.enumerate_children(
-                    'standard::name,standard::type',
-                    Gio.FileQueryInfoFlags.NONE,
-                    null,
-                );
-                let info;
-                while ((info = enumerator.next_file(null)) !== null) {
-                    const name = info.get_name();
-                    if (name.startsWith('ggml-') && name.endsWith('.bin')) {
-                        const fullPath = GLib.build_filenamev([dirPath, name]);
-                        if (!seen.has(fullPath)) {
-                            seen.add(fullPath);
-                            models.push(fullPath);
-                        }
-                    }
-                }
-                enumerator.close(null);
-            } catch (_) { /* directory may not exist */ }
-        }
-
-        models.sort();
-        return models;
+        return scanModels(this._settings);
     }
 
     /* ────────────────────────────────────────────────────────── */
@@ -790,6 +730,8 @@ export default class WhisperClipboardExtension extends Extension {
     /* ────────────────────────────────────────────────────────── */
 
     _toggle() {
+        if (this._locked) return;
+        this._locked = true;
         switch (this._state) {
         case State.IDLE:
             this._startRecording();
@@ -799,6 +741,7 @@ export default class WhisperClipboardExtension extends Extension {
             break;
         case State.TRANSCRIBING:
             // Intentionally no notification here to keep UI quiet
+            this._locked = false;
             break;
         }
     }
@@ -816,6 +759,7 @@ export default class WhisperClipboardExtension extends Extension {
 
         if (!this._serverReady) {
             Main.notify('Whisper Clipboard', 'Server is still starting, please wait…');
+            this._locked = false;
             return;
         }
 
@@ -829,6 +773,7 @@ export default class WhisperClipboardExtension extends Extension {
             );
 
             this._state = State.RECORDING;
+            this._locked = false;  // state machine now guards re-entry
             this._icon.icon_name = 'media-record-symbolic';
             this._icon.set_style('color: #ff4444;');
             this._updateStatusLabel();
@@ -907,7 +852,8 @@ export default class WhisperClipboardExtension extends Extension {
         this._recordSubprocess = null;
 
         if (!proc) {
-            this._readAndTranscribe();
+            Main.notify('Whisper Clipboard', 'No recording in progress');
+            this._resetIndicator();
             return;
         }
 
@@ -1033,7 +979,8 @@ export default class WhisperClipboardExtension extends Extension {
 
         const useCtrlShiftV = this._settings.get_boolean('paste-use-ctrl-shift-v');
 
-        GLib.timeout_add(GLib.PRIORITY_DEFAULT, 100, () => {
+        this._pasteTimeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 100, () => {
+            this._pasteTimeoutId = null;
             const t = GLib.get_monotonic_time();
 
             this._virtualDevice.notify_keyval(t, Clutter.KEY_Control_L, Clutter.KeyState.PRESSED);
@@ -1066,7 +1013,7 @@ export default class WhisperClipboardExtension extends Extension {
             );
             this._vizInputStream = this._vizProc.get_stdout_pipe();
         } catch (e) {
-            log(`[WhisperClipboard] Viz ffmpeg failed: ${e.message}`);
+            console.warn(`[WhisperClipboard] Viz ffmpeg failed: ${e.message}`);
             this._vizProc = null;
             this._vizInputStream = null;
             this._vizCancellable = null;
@@ -1126,8 +1073,14 @@ export default class WhisperClipboardExtension extends Extension {
             this._vizCancellable = null;
         }
         if (this._vizProc) {
-            try { this._vizProc.force_exit(); } catch (_) {}
+            const proc = this._vizProc;
             this._vizProc = null;
+            try {
+                proc.force_exit();
+                proc.wait_async(null, (_p, res) => {
+                    try { _p.wait_finish(res); } catch (_) {}
+                });
+            } catch (_) {}
         }
         this._vizInputStream = null;
 
@@ -1155,8 +1108,14 @@ export default class WhisperClipboardExtension extends Extension {
             this._vizCancellable = null;
         }
         if (this._vizProc) {
-            try { this._vizProc.force_exit(); } catch (_) {}
+            const proc = this._vizProc;
             this._vizProc = null;
+            try {
+                proc.force_exit();
+                proc.wait_async(null, (_p, res) => {
+                    try { _p.wait_finish(res); } catch (_) {}
+                });
+            } catch (_) {}
         }
         this._vizInputStream = null;
 
@@ -1311,14 +1270,21 @@ export default class WhisperClipboardExtension extends Extension {
 
     _killRecording() {
         if (this._recordSubprocess) {
-            try { this._recordSubprocess.send_signal(2); } catch (_) {}
-            try { this._recordSubprocess.force_exit(); } catch (_) {}
+            const proc = this._recordSubprocess;
             this._recordSubprocess = null;
+            try { proc.send_signal(2); } catch (_) {}
+            try {
+                proc.force_exit();
+                proc.wait_async(null, (_p, res) => {
+                    try { _p.wait_finish(res); } catch (_) {}
+                });
+            } catch (_) {}
         }
     }
 
     _resetIndicator() {
         this._state = State.IDLE;
+        this._locked = false;
         this._stopTimer();
         this._stopWaveformOverlay();
         if (this._icon) {

@@ -12,8 +12,9 @@ no Python, just GJS and whatever GObject Introspection gives you.
 
 ## Architecture
 
-Two files: `extension.js` (the extension itself) and `prefs.js` (the
-preferences UI). One class per file. Three states:
+Three files: `extension.js` (the extension itself), `prefs.js` (the
+preferences UI), and `constants.js` (shared constants and the
+`scanModels()` helper imported by both). One class per file. Three states:
 
     IDLE → RECORDING → TRANSCRIBING → IDLE
 
@@ -184,11 +185,12 @@ disable.
 
 ## Transcription history
 
-`this._history` is an in-memory array of `{text, timestamp}` objects,
-capped at `history-size` (GSettings, default 10). After each successful
-transcription the text is pushed to the array. The History submenu
-rebuilds itself on open (most-recent first). Clicking an entry
-re-copies the text to the clipboard.
+History entries are persisted in GSettings (`history` key, type `as`).
+Each entry is a JSON string with `{text, timestamp, language, translated}`.
+After each successful transcription the entry is appended and the list is
+trimmed to `history-size` (GSettings, 1–50, default 10). The History page
+in Preferences shows entries in reverse-chronological order with per-entry
+delete and a "Clear All" button.
 
 ## Auto-paste
 
@@ -237,17 +239,19 @@ Everything in GSettings under `org.gnome.shell.extensions.whisper-clipboard`:
 | Key | Type | Default |
 |---|---|---|
 | `whisper-clipboard-toggle` | `as` | `['<Shift><Alt>space']` |
-| `whisper-cancel-toggle` | `as` | `['<Shift><Alt>Escape']` |
+| `whisper-cancel-toggle` | `as` | `['<Shift><Alt>Delete']` |
 | `whisper-language` | `s` | `'en'` |
 | `auto-detect-language` | `b` | `false` |
 | `translate-to-english` | `b` | `false` |
-| `whisper-model` | `s` | `'/opt/whisper.cpp/models/ggml-small.bin'` |
+| `whisper-model` | `s` | `''` (auto-detected) |
 | `whisper-models-dir` | `s` | `''` |
 | `whisper-server-bin` | `s` | `''` |
+| `server-host` | `s` | `'127.0.0.1'` |
 | `server-port` | `i` | `8178` |
 | `auto-paste` | `b` | `false` |
 | `paste-use-ctrl-shift-v` | `b` | `false` |
-| `history-size` | `i` | `10` |
+| `history-size` | `i` | `10` (range 1–50) |
+| `history` | `as` | `[]` |
 | `push-to-talk` | `b` | `false` |
 
 ## Panel indicator
@@ -270,6 +274,7 @@ the pending timeout is cancelled immediately.
 
     extension.js     — the extension: state machine, recording, server, menu
     prefs.js         — preferences UI (Adw/GTK4, separate process)
+    constants.js     — shared LANGUAGES, MODEL_SEARCH_DIRS, scanModels()
     metadata.json    — GNOME Shell extension metadata
     stylesheet.css   — icon colors + timer label style
     install.sh       — compiles schemas, copies files to the extensions dir

@@ -114,14 +114,14 @@ gnome-extensions enable whisper-clipboard@local
 | Action | Default shortcut |
 |---|---|
 | Start / stop recording | **Shift+Alt+Space** |
-| Cancel recording | **Shift+Alt+Escape** |
+| Cancel recording | **Shift+Alt+Delete** |
 
 1. Press the shortcut — recording starts, the panel icon turns **red**, a timer
    appears, and a sleek, real-time waveform overlay appears below the panel. The waveform features a fluid animation where bars stay anchored but ripple horizontally and brighten from gray to white as your voice volume increases.
 2. Press it again — recording stops, the waveform switches to a smooth 3-peak sliding animation while the audio is being transcribed.
 3. Text lands in your clipboard — icon flashes **green** for 3 seconds.
 
-To cancel mid-recording without transcribing, press **Shift+Alt+Escape**.
+To cancel mid-recording without transcribing, press **Shift+Alt+Delete**.
 
 ### Push-to-talk
 
@@ -146,7 +146,7 @@ Or click the panel icon to access the quick-settings menu.
 | Setting | Default | Description |
 |---|---|---|
 | Toggle shortcut | Shift+Alt+Space | Start / stop recording |
-| Cancel shortcut | Shift+Alt+Escape | Cancel recording without transcribing |
+| Cancel shortcut | Shift+Alt+Delete | Cancel recording without transcribing |
 | Push-to-talk | off | Hold to record, release to transcribe |
 | Language | English | Language sent to whisper-server per request |
 | Auto-detect language | off | Let whisper detect the language automatically |
@@ -162,6 +162,7 @@ Or click the panel icon to access the quick-settings menu.
 | Model path | (auto-detected) | Path to a `ggml-*.bin` model file |
 | Extra models directory | — | Additional directory scanned for model files |
 | whisper-server binary | (auto-detected) | Path to `whisper-server` if not in `$PATH` |
+| Server host | 127.0.0.1 | IP/hostname; non-local host skips spawning a local server |
 | Server port | 8178 | HTTP port for the local whisper-server |
 
 ### Quick-settings menu
@@ -172,7 +173,7 @@ The panel icon opens a menu with:
 - Translate to English toggle
 - Language submenu (Auto-detect, 20 languages, custom code entry)
 - Model submenu (lists all found models)
-- History submenu (recent transcriptions, click to re-copy)
+- Preferences button (opens the History page and all settings)
 - Restart Server button
 
 ### Change a shortcut via dconf
